@@ -7,3 +7,5 @@ to update quisk in the following respects:
 
 - automatic detection whether certain modules can be included,
   such as portaudio, pulseaudio, and the sdriq package
+  
+- handle Mac OS case
