@@ -9,3 +9,5 @@ to update quisk in the following respects:
   such as portaudio, pulseaudio, and the sdriq package
   
 - handle Mac OS case
+
+Note: the original version of changed files are here ending in *.orig.
