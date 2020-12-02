@@ -5,17 +5,6 @@ import sys
 import os
 import struct
 
-if sys.platform == 'darwin':
-  cmd='rm -f mac.quisk'; os.system(cmd)
-  if sys.version_info.major == 2:
-    cmd='echo "#!/usr/bin/env python2" > mac.quisk';    os.system(cmd)
-    cmd='grep -v /usr/bin/python quisk >> mac.quisk';   os.system(cmd)
-    cmd='chmod 755 mac.quisk';                          os.system(cmd)
-  if sys.version_info.major == 3:
-    cmd='echo "#!/usr/bin/env python3" > mac.quisk';    os.system(cmd)
-    cmd='grep -v /usr/bin/python quisk >> mac.quisk';   os.system(cmd)
-    cmd='chmod 755 mac.quisk';                          os.system(cmd)
-
 # You must define the version here.  A title string including
 # the version will be written to __init__.py and read by quisk.py.
 
