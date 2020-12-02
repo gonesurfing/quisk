@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 
 import quisk	# May be quisk.py or package quisk
 
