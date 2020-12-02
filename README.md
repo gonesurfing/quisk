@@ -1,6 +1,6 @@
 # quisk
 
-This is a copy of quisk, an SDR program from James Ahlstrom N2ADR.
+This is a copy of quisk (Version 4.1.73), an SDR program from James Ahlstrom N2ADR.
 
 This repository is intendend for communication within a small group of developers
 to update quisk in the following respects:
