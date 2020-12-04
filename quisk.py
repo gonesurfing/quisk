@@ -4289,10 +4289,6 @@ class App(wx.App):
         self.sound_devices.append((0, 'pulse:', 'default', 'default', '', ''))
         self.sound_devices.append((1, 'pulse:', 'default', 'default', '', ''))
         dev_capt, dev_play = QS.pa_sound_devices()
-        for d in dev_capt:
-          print(d)
-        for d in dev_play:
-          print(d)
         for device, description, alsa in dev_capt:
             self.sound_devices.append((0, 'pulse:', description, device, '', ''))
         for device, description, alsa in dev_play:
