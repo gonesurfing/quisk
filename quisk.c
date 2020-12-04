@@ -5716,7 +5716,6 @@ static PyMethodDef QuiskMethods[] = {
 	{"test_3", test_3, METH_VARARGS, "Test 3 function."},
 	{"tx_hold_state", tx_hold_state, METH_VARARGS, "Query or set the transmit hold state."},
 	{"set_fdx", set_fdx, METH_VARARGS, "Set full duplex mode; ignore the key status."},
-	{"sound_devices", quisk_sound_devices, METH_VARARGS, "Return a list of available sound device names."},
 #ifdef MS_WINDOWS
 	{"wasapi_sound_devices", quisk_wasapi_sound_devices, METH_VARARGS, "Return a list of available WASAPI sound device names."},
 #endif
@@ -5759,6 +5758,8 @@ static PyMethodDef QuiskMethods[] = {
 	{"watfall_GetPixels", watfall_GetPixels, METH_VARARGS, "Write the Waterfall image to be displayed."},
 #ifdef QUISK_HAVE_PULSEAUDIO
 	{"pa_sound_devices", quisk_pa_sound_devices, METH_VARARGS, "Return a list of available PulseAudio sound device names."},
+#else
+	{"sound_devices", quisk_sound_devices, METH_VARARGS, "Return a list of available sound device names."}
 #endif
 	{NULL, NULL, 0, NULL}		/* Sentinel */
 };

@@ -1009,3 +1009,16 @@ PyObject * quisk_pa_sound_devices(PyObject * self, PyObject * args)
     //printf("Finished with name loop\n");
 	return pylist;
 }
+
+#if !defined(QUISK_HAVE_ALSA) && !defined(QUISK_HAVE_WASAPI)
+//
+// quisk_control_midi and the CW-MIDI status variable are defined in these two
+// modules. If they are not present, we must provide a dummy here. On MacOS,
+// we can even provide a functional replacement (ToDO)
+
+PyObject * quisk_control_midi(PyObject * self, PyObject * args, PyObject * keywds)
+{
+return Py_None;
+}
+int quisk_midi_cwkey = 0;
+#endif

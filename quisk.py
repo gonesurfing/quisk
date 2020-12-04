@@ -4275,15 +4275,28 @@ class App(wx.App):
           self.sound_devices.append((1, 'wasapi:', description, device, '', ''))
     elif sys.platform == 'darwin':
       # start with portaudio: not alsa:
-      dev_capt, dev_play = QS.sound_devices()
-      for name in dev_capt:
+      try:
+        dev_capt, dev_play = QS.sound_devices()
+        for name in dev_capt:
           device = name
           description = name
           self.sound_devices.append((0, 'portaudio:', description, device, '', ''))
-      for name in dev_play:
-          device = name
-          description = name
-          self.sound_devices.append((1, 'portaudio:', description, device, '', ''))
+        for name in dev_play:
+            device = name
+            description = name
+            self.sound_devices.append((1, 'portaudio:', description, device, '', ''))
+      except:
+        self.sound_devices.append((0, 'pulse:', 'default', 'default', '', ''))
+        self.sound_devices.append((1, 'pulse:', 'default', 'default', '', ''))
+        dev_capt, dev_play = QS.pa_sound_devices()
+        for d in dev_capt:
+          print(d)
+        for d in dev_play:
+          print(d)
+        for device, description, alsa in dev_capt:
+            self.sound_devices.append((0, 'pulse:', description, device, '', ''))
+        for device, description, alsa in dev_play:
+            self.sound_devices.append((1, 'pulse:', description, device, '', ''))
     else:
       dev_capt, dev_play = QS.sound_devices()
       for name in dev_capt:
