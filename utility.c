@@ -86,7 +86,7 @@ char * QuiskGetConfigString(const char * name, char * deflt)
 #else
     if (PyUnicode_Check(attr)) {
       PyObject * pystr = PyUnicode_AsUTF8String(attr);
-      strncpy(retbuf, PyString_AsString(pystr), QUISK_SC_SIZE);
+      strMcpy(retbuf, PyString_AsString(pystr), QUISK_SC_SIZE);
       retbuf[QUISK_SC_SIZE - 1] = 0;
       res = retbuf;
       Py_DECREF(pystr);
@@ -125,24 +125,24 @@ double QuiskTimeSec(void)
 #endif
 }
 
-int QuiskDeltaMsec(int timer)
-{  // return the number of milliseconds since the last call for the timer.
+double QuiskDeltaSec(int timer)
+{  // return the number of seconds since the last call for the timer.
    // There are two timers. The "timer" is either 0 or 1. Call first and throw away the result.
-	static long long time0[2] = {0, 0};
-	long long now;  // in msec
-	int delta;
+	static double time0[2] = {0, 0};
+	double now;  // in seconds
+	double delta;
 #ifdef MS_WINDOWS
 	// Code contributed by Ben Cahill
-	static long long timer_rate = 0;
+	static double timer_rate = 0;
 	LARGE_INTEGER L;
-	if ( ! timer_rate) {
+	if (timer_rate == 0) {
 		if (QueryPerformanceFrequency(&L))
-			timer_rate = L.QuadPart;
+			timer_rate = (double)L.QuadPart;
 		else
-			timer_rate = 1;
+			timer_rate = 1.0;
 	}
 	if (QueryPerformanceCounter(&L))
-		now = (double)L.QuadPart * 1000 / timer_rate;
+		now = (double)L.QuadPart / timer_rate;
 	else
 		now = 0;
 #else
@@ -153,13 +153,13 @@ int QuiskDeltaMsec(int timer)
 	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
 #endif
 		return 0;
-	now = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+	now = (double)ts.tv_sec + ts.tv_nsec * 1E-9;
 #endif
 	if (timer < 0 || timer >= 2)
 		return 0;
 	if (now < time0[timer])
 		now = time0[timer] = 0;
-	delta = (int)(now - time0[timer]);
+	delta = now - time0[timer];
 	time0[timer] = now;
 	return delta;
 }
@@ -266,10 +266,20 @@ void QuiskMeasureRate(const char * msg, int count, int index, int reset)
 	}
 }
 
+char * strMcpy(char * pDest, const char * pSrc, size_t sizeDest)
+{  // replacement for strncpy()
+	size_t sizeCopy;
+
+	sizeCopy = strnlen(pSrc, sizeDest - 1);
+	memcpy(pDest, pSrc, sizeCopy);
+	pDest[sizeCopy] = 0;
+	return pDest;
+}
+
 #ifdef MS_WINDOWS
 #define QP_BUF_DELTA   256
 PyObject * QuiskPrintf(char * format, ...)
-{
+{  // thread safe version of printf() needed by Windows
         int length;
         PyObject * py_string;
         static int buf_size;            // size of buffer
@@ -303,6 +313,7 @@ PyObject * QuiskPrintf(char * format, ...)
                 buf_strlen = strlen(buffer);
         }
         else {
+//printf("%s", buffer + buf_strlen);
                 buf_strlen += length;
         }
         va_end(args);

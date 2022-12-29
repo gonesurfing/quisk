@@ -21,10 +21,40 @@ class Adf4351:      # class to hold adf4351 attributes
     self.modulus = 23
     self.changed = 0
 
+class Preamp:	# Lone Wire Bus control of preamp for 2 meters and 70 cm
+  def __init__(self):
+    self.IP = '192.168.1.194'
+    self.PORT = 0x3A00 + 67
+    # Create a socket for the Lone Wire Bus control of the preamp
+    self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    self.socket.connect((self.IP, self.PORT))
+    self.socket.settimeout(0)
+    self.want_preamp = self.have_preamp = '\000'
+  def ChangeBand(self, band):
+    if band == '2':
+      self.want_preamp = '\001'
+    elif band == '70cm':
+      self.want_preamp = '\002'
+    else:
+      self.want_preamp = '\000'
+    #print ("ChangeBand", band)
+  def HeartBeat(self):
+    try:
+      data = self.socket.recv(4096)
+    except:
+      pass
+    else:
+      if len(data) == 1:
+        self.have_preamp = data
+        #print ("Got data 0x%X" % ord(data))
+    if self.want_preamp != self.have_preamp:
+      self.socket.send(self.want_preamp)
+      #print ("Send data 0x%X" % ord(self.want_preamp))
+
+
 class Hardware(BaseHardware):
   def __init__(self, app, conf):
     BaseHardware.__init__(self, app, conf)
-    self.use_sidetone = 0
     self.vfo_frequency = 52000000
     self.vfo_sample_rate = conf.sample_rate
     self.vfo_test = 0	# JIM
@@ -56,6 +86,7 @@ class Hardware(BaseHardware):
     self.scan_samples = 1
     self.scan_phase = 0
     self.fft_scan_valid = 0.84
+    self.preamp = Preamp()
     self.Rx4351 = Adf4351(True, self.rx_clock38, 8)
     self.Tx4351 = Adf4351(False, 10700000, 2)
     self.Tx4351.aux_rf_out = 0b000  # enable aux RF out 0b111 or turn off 0b000
@@ -192,6 +223,7 @@ class Hardware(BaseHardware):
     except KeyError:
       DcI, DcQ = (0.0, 0.0)
     self.NewUdpCorrect(DcI, DcQ)
+    self.preamp.ChangeBand(band)
   def NewUdpCorrect(self, DcI, DcQ):
     self.DcI = DcI
     self.DcQ = DcQ
@@ -302,6 +334,7 @@ class Hardware(BaseHardware):
         pass
     if 0:
       self.rx_udp_socket.send('Qs')
+    self.preamp.HeartBeat()
   def VarDecimGetChoices(self):		# return text labels for the control
     return self.var_rates
   def VarDecimGetLabel(self):		# return a text label for the control

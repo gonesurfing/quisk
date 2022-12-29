@@ -7,7 +7,17 @@
 <meta name="author" content="James C. Ahlstrom">
 <meta name="keywords" content="quisk, sdr, software defined radio, ham radio">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-</head><body>
+</head>
+<style>
+p      {font-size:1.2rem;}
+pre    {font-size:1.2rem;}
+ul     {font-size:1.2rem;}
+table  {font-size:1.2rem;}
+h1     {font-size:2.0rem;}
+h2     {font-size:1.8rem;}
+h3     {font-size:1.6rem;}
+</style>
+<body>
 <h3>
 QUISK Help
 </h3>
@@ -19,8 +29,6 @@ QUISK Help
 <a href="docs.html">The documentation is here</a>.
 <br>
 <br>
-<a href="defaults.html">The default configuration is here</a>.
-<br>
 </p>
 
 <p>This is the Help file for Quisk, a Software Defined Radio (SDR).
@@ -31,7 +39,7 @@ Thanks to Terry Fox WB4JFI for code improvements, and for adding support
 for the Charleston hardware. Thanks to Sid Boyce, G3VBV, for sending me SoftRock hardware to work
 with.  Thanks to Christof, DJ4CM, for many improvements to the GUI and for the Dx cluster display.
 Thanks to Philip G. Lee for adding native support for PulseAudio, and to Eric Thornton for
-adding PulseAudio async low-latency support.  There are many other contributers who are
+adding PulseAudio async low-latency support.  There are many other contributors who are
 mentioned in the source code.
 </p>
 <p>
@@ -315,8 +323,9 @@ Quisk can also record the speaker audio, mic audio and the digital I/Q samples t
 files.  Set the file names in the Config/Config screen.  Enable the recording by checking
 the box. Then Press
 the "FileRecord" button to begin recording, and release it to stop.
-If you press it again, it starts a new recording to replace the
-previous one.  The speaker and mic audio are stored as 16-bit monophonic
+If you press it again, it starts a new recording with a sequence number 001, 002, 003 etc.
+Choose a directory (folder) to save these files because you will need to delete the ones you no longer need.
+The speaker and mic audio are stored as 16-bit monophonic
 samples at the audio play rate.
 Both the audio play and mic rates should be 48 ksps.
 The digital I/Q samples are stored as two
@@ -398,17 +407,20 @@ they become available from the server.
 
 <h3 id="g0.0.9">Configuration Screens </h3>
 
+<p>
 The Configuration screen shows a group of sub-screens that give status information,
 and that adjust various Quisk control parameters.
-The Status screen shows Quisk status information.  The Sound screen gives the name of
-the sound cards detected.
+The Status screen shows Quisk status information.
 
 The Favorites screen allows you to enter frequencies and modes for
 stations, nets, etc.  To add a line, right-click the left label
 and select Insert or Append.  To tune to a station, select
 Tune.
+</p>
 
 <p>
+The Config screen controls features that apply to all radios. There is a band plan button
+to control the colors shown for the CW and phone segmants of each band.
 The Config screen can pop up an
 amplitude and phase correction window for SoftRock and similar receivers.
 If you use the sound card for input, you may need to correct for small errors
@@ -474,18 +486,13 @@ preemphasis.
 
 <p>
 These modes are used for digital signals, and require an external
-program such as Fldigi or wsjtx to decode the signals. First, connect your digital program
+program such as Fldigi or WSJT-X to decode the signals.
+First, connect your digital program
 to quisk using Hamlib or XML-RPC so that frequency changes are recognized.
-See "Hamlib Control" below. Next you need a way to transfer digital samples between
-the programs. For Windows, install a Virtual Audio Cable (VAC) and connect Quisk to one end and the
+See "Hamlib Control" below. Next you need a way to transfer digital samples between the programs.
+For Windows, install a Virtual Audio Cable (VAC) and connect Quisk to one end and the
 digital program to the other. For Linux, Quisk can create a VAC itself by using PulseAudio.
-On the Quisk radio "Sound" configuration screen, set Digital Input to
-pulse:QuiskDigitalInput.monitor, and set Digital Output to pulse:QuiskDigitalOutput.
-These names should be on the drop down list. If they are missing, restart Quisk.
-In your digital program, connect the digital
-input to QuiskDigitalOutput.monitor and the digital output to QuiskDigitalInput.
-Quisk will then send a slice of the receive spectrum to the digital program.  The
-center frequency is 1500 Hertz. Set that frequency in your digital program for transmit.
+Digital data is only sent when one of the "DGT-" modes is in use.
 See the <a href="docs.html">documentation</a> for more information.</p>
 
 <h3 id="g0.0.12">Hamlib Control </h3>
@@ -493,21 +500,13 @@ See the <a href="docs.html">documentation</a> for more information.</p>
 <p>
 Most digital and logging programs use Hamlib to control
 a rig so that frequency changes in one program are recognized in the other.
-Quisk has three options for external control. See the Config/radio/Remote screen.
-To connect an external program to Quisk using Hamlib, configure your program to use "Hamlib NET rigctl" (rig 2).
-Then go to the Quisk "Remote" config screen for your radio and set
-"IP port for Hamlib" to 4532. This assumes you are not using the rigctld daemon program.  If you are,
-set the Quisk port to 4575 and tell rigctld to control quisk on port 4575.
-You can also control Quisk from another program by using the XML-RPC method if this is available
-in your program.  Fldigi can use this method. If your program only uses a serial port (N1MM+) then
-use Hamlib with the rig set to "Flex" and connect to the Quisk serial port set on the Remote screen.
-For Linux, Quisk can set up these ports itself, and they have names like "/tmp/QuiskTTY0". On Windows
-you need a "Virtual Serial Port" that is set up by an external program. This is like the "Virtual Audio Cable"
-needed for samples. An Internet search will turn up HDD Software, Eltima Software and many others. Set up a port pair,
-and enter one name on the Quisk Remote screen, and the other name in the external program.
+Quisk has three options for external control: Hamlib, XML-RPC and a serial port emulating the "Flex" protocol.
+See the <a href="docs.html">documentation</a> for more information.</p>
 </p>
+
 <h3 id="g0.0.13">Multiple Receivers </h3>
 
+<p>
 Quisk can tune in two frequencies in the same band by using the "Split" button.
 This is meant for working DX split, but it can be used anywhere in the band.
 But if you want to receive in two different bands at once, you need SDR hardware that
@@ -518,10 +517,11 @@ the main receiver and transmitter.  The menu button on the "Add Rx" button contr
 the sub-receiver sound goes.  When a sub-receiver "Play" button is pressed, you can play the sound
 alone, or together with the main receiver sound.  There is an additional device on the sound screen
 that can direct the sound from sub-receiver 1 to an external digital program.
-There is a limit to how many sub-receivers your hardware can support.  Quisk does not know this
+There is a limit to how many sub-receivers your hardware can support.  Quisk may not know this
 limit, so please do not request more sub-receivers than actually exist.
+</p>
 
 
-<h4>Have fun with Quisk.</h4>
+<br><br>
 </body>
 </html>

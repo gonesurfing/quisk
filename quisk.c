@@ -1,3 +1,4 @@
+#define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <stdlib.h>
 #include <math.h>
@@ -6,7 +7,7 @@
 #include <sys/types.h>
 
 #ifdef MS_WINDOWS
-#include <Winsock2.h>
+#include <winsock2.h>
 #include <iphlpapi.h>
 static int cleanupWSA = 0;		// Must we call WSACleanup() ?
 HWND quisk_mainwin_handle;		// Handle of the main window on Windows
@@ -153,9 +154,9 @@ static int PySampleCount;				// count of samples in buffer
 
 static int multirx_data_width;			// width of graph data to return
 static int multirx_fft_width;			// size of FFT samples
-int quisk_multirx_count;				// number of additional receivers zero or 1, 2, 3, ...
+int quisk_multirx_count;			// number of additional receivers zero or 1, 2, 3, ...
 static int quisk_multirx_state;			// state of hermes receivers
-static mrx_fft_data multirx_fft_data[QUISK_MAX_RECEIVERS];		// FFT data for the sub-receivers
+static mrx_fft_data multirx_fft_data[QUISK_MAX_SUB_RECEIVERS];		// FFT data for the sub-receivers
 static int multirx_fft_next_index;								// index of the receiver for the next FFT to return
 static double multirx_fft_next_time;							// timing interval for multirx FFT
 static int multirx_fft_next_state;								// state of multirx FFT: 0 == filling, 1 == ready, 2 == done
@@ -163,17 +164,19 @@ static fftw_plan multirx_fft_next_plan;							// fftw3 plan for multirx FFTs
 static fftw_complex * multirx_fft_next_samples;					// sample buffer for multirx FFT
 static int multirx_play_method;			// 0== both, 1==left, 2==right
 static int multirx_play_channel = -1;	// index of the channel to play; or -1
-static int multirx_freq[QUISK_MAX_RECEIVERS];			// tune frequency for channel
-static int multirx_mode[QUISK_MAX_RECEIVERS];			// mode CW, SSB, etc. for channel
+static int multirx_freq[QUISK_MAX_SUB_RECEIVERS];			// tune frequency for channel
+static int multirx_mode[QUISK_MAX_SUB_RECEIVERS];			// mode CW, SSB, etc. for channel
 
-static complex double * multirx_cSamples[QUISK_MAX_RECEIVERS];		// samples for the sub-receivers
+static complex double * multirx_cSamples[QUISK_MAX_SUB_RECEIVERS];		// samples for the sub-receivers
 static int multirx_sample_size;					// current size of the sub-receiver sample array
 
 double quisk_sidetoneVolume;		// Audio output level of the CW sidetone, 0.0 to 1.0
-int quiskKeyupDelay=0;			// key-up delay from config file
-static complex double sidetonePhase;		// Phase increment for sidetone
+static complex double sidetonePhase;	// Phase increment for sidetone
 int quisk_sidetoneCtrl;			// sidetone control value 0 to 1000
 int quisk_sidetoneFreq;			// frequency in hertz for the sidetone
+int quisk_start_cw_delay = 15;		// milliseconds to delay output on CW key down
+int quisk_start_ssb_delay = 100;	// milliseconds to discard output on SSB etc. key down
+static int maximum_tx_secs;		// Failsafe timeout for Tx in seconds
 static int key_is_down = 0;		// internal key state up or down
 
 static double agcReleaseGain=80;		// AGC maximum gain
@@ -210,6 +213,8 @@ unsigned int quisk_hermes_board_id = -1;		// board ID returned by the Hermes har
 static double hermes_temperature;	// average temperature
 static double hermes_fwd_power;		// average forward power
 static double hermes_rev_power;		// average reverse power
+static double hermes_fwd_peak;		// peak forward power
+static double hermes_rev_peak;		// peak reverse power
 static double hermes_pa_current;	// average power amp current
 static int hermes_count_temperature;	// number of temperature samples
 static int hermes_count_current;	// number of current samples
@@ -217,6 +222,8 @@ static int hardware_ptt;		// hardware PTT switch
 
 int quisk_hardware_cwkey;		// hardware CW key from UDP or USB
 static int old_hardware_cwkey;		// previous hardware CW key
+int quisk_remote_cwkey;			// remote CW key (sent from control head)
+static int old_remote_cwkey;		// previous remote CW key
 
 enum quisk_rec_state quisk_record_state = IDLE;
 static float * quisk_record_buffer;
@@ -252,20 +259,22 @@ static struct  _MeasureSquelch {
 
 // These are used for playback of a WAV file.
 static int wavStart;			// Sound data starts at this offset
-// Two wavFp are needed because the same file is used twice on asynchronous streams.
-static FILE * wavFpSound;		// File pointer for audio WAV file input
-static FILE * wavFpMic;			// File pointer for microphone WAV file input
+// Open two WAV files with the same name. Two wavFp are needed because the same file is used on asynchronous streams.
+static FILE * wavFpSound;		// File pointer to play the Audio WAV file or Samples WAV file
+static FILE * wavFpMic;			// File pointer to play the same Audio WAV file replacing the Microphone sound
+int quisk_close_file_play;
 
 // These are used for bandscope data from Hermes
 static int enable_bandscope = 1;
 static fftw_plan bandscopePlan=NULL;
-static int bandscopeState = 0;
-static int bandscopeBlockCount = 4;
+static unsigned int bandscopeState = 0;
+static unsigned int bandscopeBlockCount = 4;
 static int bandscope_size = 0;
 static double * bandscopeSamples = NULL;	// bandscope samples are normalized to max 1.0 with bandscopeScale
 static double bandscopeScale = 32768;		// maximum value of the samples sent to the bandscope
 static double * bandscopeWindow = NULL;
 static double * bandscopeAverage = NULL;
+static double * bandscopePixels = NULL;
 static complex double * bandscopeFFT = NULL;
 static double hermes_adc_level = 0.0;		// maximum bandscope sample from the ADC, 0.0 to 1.0
 
@@ -1243,6 +1252,8 @@ complex double cRxFilterOut(complex double sample, int bank, int nFilter)
 static void AddTestTone(complex double * cSamples, int nSamples)
 {
 	int i;
+	//int freq;
+	//static int old_freq=0;
 	static complex double testtoneVector = 21474836.47;	// -40 dB
 	static complex double audioVector = 1.0;
 	complex double audioPhase;
@@ -1266,8 +1277,16 @@ static void AddTestTone(complex double * cSamples, int nSamples)
 		break;
 	case FM:		 // FM
 	case DGT_FM:
-		//audioPhase = cexp(I * 2 * M_PI * quisk_sidetoneCtrl * 5 / sample_rate);
+#if 0
+		freq = quisk_sidetoneCtrl * 5;
+		audioPhase = cexp(I * 2 * M_PI * freq / quisk_sound_state.sample_rate);
+		if (old_freq != freq) {
+			old_freq = freq;
+			printf("test tone frequency %d Hz\n", freq);
+		}
+#else
 		audioPhase = cexp(I * 2.0 * M_PI * 1000 / quisk_sound_state.sample_rate);
+#endif
 		for (i = 0; i < nSamples; i++) {
 			cSamples[i] += testtoneVector * cexp(I * creal(audioVector));
 			testtoneVector *= testtonePhase;
@@ -1318,9 +1337,9 @@ static PyObject * set_record_state(PyObject * self, PyObject * args)
 		quisk_mic_index = 0;
 		quisk_record_full = 0;
 		if (button == 0)
-			quisk_record_state = RECORD_RADIO;
+			quisk_record_state = TMP_RECORD_SPEAKERS;
 		else
-			quisk_record_state = RECORD_MIC;
+			quisk_record_state = TMP_RECORD_MIC;
 		break;
 	case 1:			// release record
 		quisk_record_state = IDLE;
@@ -1335,25 +1354,26 @@ static PyObject * set_record_state(PyObject * self, PyObject * args)
 			quisk_play_index = 0;
 		}
 		quisk_mic_index = quisk_play_index;
-		quisk_record_state = PLAYBACK;
+		quisk_record_state = TMP_PLAY_SPKR_MIC;
 		break;
 	case 3:			// release play
 		quisk_record_state = IDLE;
+		quisk_close_file_play = 1;
 		break;
 	case 5:			// press play file
 		if (wavFpSound)
 			fseek (wavFpSound, wavStart, SEEK_SET);
 		if (wavFpMic)
 			fseek (wavFpMic, wavStart, SEEK_SET);
-		quisk_record_state = PLAY_FILE;
+		quisk_record_state = FILE_PLAY_SPKR_MIC;
 		break;
 	case 6:			// press play samples file
 		if (wavFpSound)
 			fseek (wavFpSound, wavStart, SEEK_SET);
-		quisk_record_state = PLAY_SAMPLES;
+		quisk_record_state = FILE_PLAY_SAMPLES;
 		break;
 	}
-	return PyInt_FromLong(quisk_record_state != PLAYBACK && quisk_record_state != PLAY_FILE && quisk_record_state != PLAY_SAMPLES);
+	return PyInt_FromLong(quisk_record_state != TMP_PLAY_SPKR_MIC && quisk_record_state != FILE_PLAY_SPKR_MIC && quisk_record_state != FILE_PLAY_SAMPLES);
 }
 
 void quisk_tmp_record(complex double * cSamples, int nSamples, double scale)		// save sound
@@ -1396,10 +1416,9 @@ static PyObject * tmp_record_save(PyObject * self, PyObject * args)
 	if (!PyArg_ParseTuple (args, "s", &fname))
 		return NULL;
 	memset(&file_rec_tmp, 0, sizeof(struct wav_file));
-	file_rec_tmp.enable = 1;
-	strncpy(file_rec_tmp.file_name, fname, QUISK_PATH_SIZE);
+	strMcpy(file_rec_tmp.file_name, fname, QUISK_PATH_SIZE);
 	quisk_record_audio(&file_rec_tmp, NULL, -1);	// Open file
-	if (file_rec_tmp.enable == 0) {
+	if ( ! file_rec_tmp.fp) {
 		QuiskPrintf("Failed to open file %s\n", fname);
 	}
 	else {
@@ -1441,8 +1460,20 @@ void quisk_tmp_microphone(complex double * cSamples, int nSamples)
 	}
 }
 
+static void wav_files_close(void)
+{
+	if (wavFpMic)
+		fclose(wavFpMic);
+	if (wavFpSound)
+		fclose(wavFpSound);
+	wavFpSound = wavFpMic = NULL;
+}
+
 static PyObject * open_wav_file_play(PyObject * self, PyObject * args)
 {
+// Open the same file twice and record the start of the sound data. 
+// One will be used to replace the speaker sound, the other replaces the mic sound.
+// Use only one for the I/Q samples.
 // The WAV file must be recorded at 48000 Hertz in S16_LE format monophonic for audio files.
 // The WAV file must be recorded at the sample_rate in IEEE format stereo for the I/Q samples file.
 	const char * fname;
@@ -1451,11 +1482,7 @@ static PyObject * open_wav_file_play(PyObject * self, PyObject * args)
 
 	if (!PyArg_ParseTuple (args, "s", &fname))
 		return NULL;
-	if (wavFpMic)
-		fclose(wavFpMic);
-	if (wavFpSound)
-		fclose(wavFpSound);
-	wavFpSound = wavFpMic = NULL;
+	wav_files_close();
 	wavFpSound = fopen(fname, "rb");
 	if (!wavFpSound) {
 		QuiskPrintf("open wav file failed\n");
@@ -1815,18 +1842,22 @@ static int quisk_process_decimate(complex double * cSamples, int nSamples, int b
 static int quisk_process_demodulate(complex double * cSamples, double * dsamples, int nSamples, int bank, int nFilter, rx_mode_type rx_mode)
 {	// Changes here will require changes to get_filter_rate();
 	int i;
-	complex double cx, cpx;
+	complex double cx;
 	double d, di, dd;
 	static struct AgcState Agc1 = {0.3, 16000, 0}, Agc2 = {0.3, 16000, 0};
+//static int count=0;
+//static double phase=0;
 	static struct stStorage {
 		complex double fm_1;			// Sample delayed by one
 		double dc_remove;		// DC removal for AM
 		double FM_www;
 		double FM_nnn, FM_a_0, FM_a_1, FM_b_1, FM_x_1, FM_y_1;   // filter for FM
+		//double FM_phase;
 		struct quisk_cHB45Filter HalfBand4;
 		struct quisk_cHB45Filter HalfBand5;
 		struct quisk_dHB45Filter HalfBand6;
 		struct quisk_dHB45Filter HalfBand7;
+		struct quisk_dFilter filtAudio48p3;
 		struct quisk_dFilter filtAudio24p3;
 		struct quisk_dFilter filtAudio24p4;
 		struct quisk_dFilter filtAudio12p2;
@@ -1835,6 +1866,7 @@ static int quisk_process_demodulate(complex double * cSamples, double * dsamples
 		struct quisk_cFilter filtDecim16to8;
 		struct quisk_cFilter filtDecim48to24;
 		struct quisk_cFilter filtDecim48to16;
+		//struct quisk_dFilter filtFMdiff;
 	} Storage[MAX_RX_CHANNELS] ;
 
 	if ( ! cSamples) {	// Initialize all filters
@@ -1843,6 +1875,7 @@ static int quisk_process_demodulate(complex double * cSamples, double * dsamples
 			memset(&Storage[i].HalfBand5, 0, sizeof(struct quisk_cHB45Filter));
 			memset(&Storage[i].HalfBand6, 0, sizeof(struct quisk_dHB45Filter));
 			memset(&Storage[i].HalfBand7, 0, sizeof(struct quisk_dHB45Filter));
+			quisk_filt_dInit(&Storage[i].filtAudio48p3, quiskLpFilt48Coefs, sizeof(quiskLpFilt48Coefs)/sizeof(double));
 			quisk_filt_dInit(&Storage[i].filtAudio24p3, quiskAudio24p3Coefs, sizeof(quiskAudio24p3Coefs)/sizeof(double));
 			quisk_filt_dInit(&Storage[i].filtAudio24p4, quiskAudio24p4Coefs, sizeof(quiskAudio24p4Coefs)/sizeof(double));
 			quisk_filt_dInit(&Storage[i].filtAudio12p2, quiskAudio24p4Coefs, sizeof(quiskAudio24p4Coefs)/sizeof(double));
@@ -1851,6 +1884,8 @@ static int quisk_process_demodulate(complex double * cSamples, double * dsamples
 			quisk_filt_cInit(&Storage[i].filtDecim16to8, quiskFilt16dec8Coefs, sizeof(quiskFilt16dec8Coefs)/sizeof(double));
 			quisk_filt_cInit(&Storage[i].filtDecim48to24, quiskFilt48dec24Coefs, sizeof(quiskFilt48dec24Coefs)/sizeof(double));
 			quisk_filt_cInit(&Storage[i].filtDecim48to16, quiskAudio24p3Coefs, sizeof(quiskAudio24p3Coefs)/sizeof(double));
+			//quisk_filt_dInit(&Storage[i].filtFMdiff, quiskDiff48Coefs, sizeof(quiskDiff48Coefs)/sizeof(double));
+			//quisk_filt_differInit(&Storage[i].filtFMdiff, 9);
 			Storage[i].fm_1 = 10;
 			Storage[i].FM_www = tan(M_PI * FM_FILTER_DEMPH / 48000);   // filter for FM at 48 ksps
 			Storage[i].FM_nnn = 1.0 / (1.0 + Storage[i].FM_www);
@@ -1978,27 +2013,53 @@ static int quisk_process_demodulate(complex double * cSamples, double * dsamples
 	case FM:		// FM at 48 ksps
 	case DGT_FM:
 		quisk_filter_srate = quisk_decim_srate;
+#if 1
 		for (i = 0; i < nSamples; i++) {
 			cx = dRxFilterOut(cSamples[i], bank, nFilter);
 			MeasureSquelch[bank].rf_sum += cabs(cx);
 			MeasureSquelch[bank].rf_count += 1;
-			cpx = cx * conj(Storage[bank].fm_1);
+			// Phase difference in successive samples
+			di = carg(cx * conj(Storage[bank].fm_1));
 			Storage[bank].fm_1 = cx;
-			di = quisk_filter_srate * carg(cpx);
+			dsamples[i] = di;
+		}
+#endif
+#if 0
+		count += nSamples;
+		for (i = 0; i < nSamples; i++) {
+			cx = dRxFilterOut(cSamples[i], bank, nFilter);
+			// Integrate phase difference in successive samples and then differentiate. Phase drifts.
+			di = carg(cx * conj(Storage[bank].fm_1));
+			Storage[bank].fm_1 = cx;
+			MeasureSquelch[bank].audio_sum += fabs(di);
+			Storage[bank].FM_phase += di;
+			dsamples[i] = Storage[bank].FM_phase;
+		}
+		if (count >= 48000) {
+			count = 0;
+			printf("Phase %12.4lf\n", dsamples[0]);
+		}
+		nSamples = quisk_dFilter(dsamples, nSamples, &Storage[bank].filtFMdiff);
+#endif
+		for (i = 0; i < nSamples; i++) {
+			dsamples[i] *= 20e5;
+			di = dsamples[i];
 			// FM de-emphasis
-			dsamples[i] = dd = Storage[bank].FM_y_1 = di * Storage[bank].FM_a_0 +
+			dsamples[i] = Storage[bank].FM_y_1 = di * Storage[bank].FM_a_0 +
 				Storage[bank].FM_x_1 * Storage[bank].FM_a_1 - Storage[bank].FM_y_1 * Storage[bank].FM_b_1;
 			Storage[bank].FM_x_1 = di;
-			if(bank == 0) {
-				measure_audio_sum += dd * dd;
+		}
+		nSamples = quisk_dDecimate(dsamples, nSamples, &Storage[bank].filtAudio48p3, 4);
+		nSamples = quisk_dFilter(dsamples, nSamples, &Storage[bank].filtAudioFmHp);
+		nSamples = quisk_dInterp2HB45(dsamples, nSamples, &Storage[bank].HalfBand6);
+		nSamples = quisk_dInterp2HB45(dsamples, nSamples, &Storage[bank].HalfBand7);
+		if(bank == 0) {
+			dAutoNotch(dsamples, nSamples, 0, quisk_filter_srate);
+			for (i = 0; i < nSamples; i++) {
+				measure_audio_sum += dsamples[i] * dsamples[i];
 				measure_audio_count += 1;
 			}
 		}
-		nSamples = quisk_dDecimate(dsamples, nSamples, &Storage[bank].filtAudio24p3, 2);
-		nSamples = quisk_dFilter(dsamples, nSamples, &Storage[bank].filtAudioFmHp);
-		nSamples = quisk_dInterp2HB45(dsamples, nSamples, &Storage[bank].HalfBand6);
-		if(bank == 0)
-			dAutoNotch(dsamples, nSamples, 0, quisk_filter_srate);
 		if (MeasureSquelch[bank].rf_count >= 2400) {
 			MeasureSquelch[bank].squelch = MeasureSquelch[bank].rf_sum / MeasureSquelch[bank].rf_count / CLIP32;
 			if (MeasureSquelch[bank].squelch > 1.E-10)
@@ -2006,7 +2067,7 @@ static int quisk_process_demodulate(complex double * cSamples, double * dsamples
 			else
 				MeasureSquelch[bank].squelch = -200.0;
 			MeasureSquelch[bank].rf_sum = MeasureSquelch[bank].rf_count = 0;
-//if (bank == 0) QuiskPrintf("MeasureSquelch %.5f\n", MeasureSquelch[0].squelch);
+			//printf("RF %12.4lf level %12.4lf\n", MeasureSquelch[bank].squelch, squelch_level);
 		}
 		MeasureSquelch[bank].squelch_active = MeasureSquelch[bank].squelch < squelch_level;
 		break;
@@ -2185,7 +2246,7 @@ static void process_agc(struct AgcState * dat, complex double * csamples, int co
 			}
 			else if (dat->index_read == dat->index_start) {
 				clip_gain = dat->max_out * CLIP32 / dat->themax;		// clip gain based on the maximum sample in the buffer
-				if (rxMode == FM || rxMode == DGT_FM)		// mode is FM
+				if (0) //rxMode == FM || rxMode == DGT_FM)		// mode is FM
 					dat->target_gain = clip_gain;
 				else if (agcReleaseGain > clip_gain)
 					dat->target_gain = clip_gain;
@@ -2546,7 +2607,7 @@ int quisk_process_samples(complex double * cSamples, int nSamples)
 			break;
 		}
 	}
-	else if (multirx_play_channel >= 0) {		// Demodulate a second channel from a different receiver
+	else if (multirx_play_channel >= 0 && multirx_cSamples[multirx_play_channel]) {		// Demodulate a second channel from a different receiver
 		memcpy(buf_cSamples, multirx_cSamples[multirx_play_channel], orig_nSamples * sizeof(complex double));
 		phase = cexp((I * -2.0 * M_PI * (multirx_freq[multirx_play_channel])) / quisk_sound_state.sample_rate);
 		// Tune the second channel to frequency
@@ -2590,7 +2651,7 @@ int quisk_process_samples(complex double * cSamples, int nSamples)
 	rx_mode = multirx_mode[0];
 	if (quisk_multirx_count > 0 &&
 	(rx_mode == DGT_U || rx_mode == DGT_L || rx_mode == DGT_IQ || rx_mode == DGT_FM)  &&
-	quisk_DigitalRx1Output.driver) {
+	quiskPlaybackDevices[QUISK_INDEX_SUB_RX1]->driver) {
 		phase = cexp((I * -2.0 * M_PI * (multirx_freq[0])) / quisk_sound_state.sample_rate);
 		// Tune the channel to frequency
 		for (i = 0; i < orig_nSamples; i++) {
@@ -2607,7 +2668,7 @@ int quisk_process_samples(complex double * cSamples, int nSamples)
 				multirx_cSamples[0][i] = dsamples2[i] + I * dsamples2[i];
 			process_agc(&Agc3, multirx_cSamples[0], n, 0);
 		}
-		play_sound_interface(&quisk_DigitalRx1Output, n, multirx_cSamples[0], 1, 1.0);
+		play_sound_interface(quiskPlaybackDevices[QUISK_INDEX_SUB_RX1], n, multirx_cSamples[0], 1, 1.0);
 	}
 
 	// Perhaps decimate by an additional fraction
@@ -2616,6 +2677,8 @@ int quisk_process_samples(complex double * cSamples, int nSamples)
 		nSamples = cFracDecim(cSamples, nSamples, double_filter_decim);
 		quisk_decim_srate = 48000;
 	}
+	// Process the Rx path with the WDSP library
+	nSamples = wdspFexchange0(QUISK_WDSP_RX, (double *)cSamples, nSamples);
 
 	// Interpolate the samples from 48000 sps to the play rate.
 	switch (quisk_sound_state.playback_rate / 48000) {
@@ -2696,7 +2759,7 @@ start_agc:
 			cSamples[i] *= keyupEnvelope;
 		}
 	}
-	if (quisk_record_state == RECORD_RADIO && ! (squelch_real && squelch_imag))
+	if (quisk_record_state == TMP_RECORD_SPEAKERS && ! (squelch_real && squelch_imag))
 		quisk_tmp_record(cSamples, nSamples, 1.0);		// save radio sound
 	return nSamples;
 }
@@ -2721,7 +2784,7 @@ static PyObject * get_state(PyObject * self, PyObject * args)
 		quisk_sound_state.underrun_error,
 		quisk_sound_state.latencyCapt,
 		quisk_sound_state.latencyPlay,
-		quisk_sound_state.interupts,
+		quisk_sound_state.interrupts,
 		fft_error,
 		mic_max_display,
 		quisk_sound_state.data_poll_usec
@@ -2839,6 +2902,7 @@ static void init_bandscope(void)
 	int i, j;
 
 	if (bandscope_size > 0) {
+		bandscopePixels = (double *)malloc(graph_width * sizeof(double));
 		bandscopeSamples = (double *)malloc(bandscope_size * sizeof(double));
 		bandscopeWindow = (double *)malloc(bandscope_size * sizeof(double));
 		bandscopeAverage = (double *)malloc((bandscope_size / 2 + 1 + 1) * sizeof(double));
@@ -3006,8 +3070,39 @@ static PyObject * get_params(PyObject * self, PyObject * args)
 
 	if (!PyArg_ParseTuple (args, "s", &name))
 		return NULL;
+	if (strcmp(name, "QUISK_HAVE_PULSEAUDIO") == 0) {
+#ifdef QUISK_HAVE_PULSEAUDIO
+		return PyInt_FromLong(1);
+#else
+		return PyInt_FromLong(0);
+#endif
+	}
+	if (strcmp(name, "rx_udp_started") == 0)
+		return PyInt_FromLong(quisk_rx_udp_started);
 	Py_INCREF (Py_None);
 	return Py_None;
+}
+
+static PyObject * write_fftw_wisdom(PyObject * self, PyObject * args)
+{
+	if (!PyArg_ParseTuple (args, ""))
+		return NULL;
+	fftw_export_wisdom_to_filename(fftw_wisdom_name);
+	Py_INCREF (Py_None);
+	return Py_None;
+}
+
+static PyObject * read_fftw_wisdom(PyObject * self, PyObject * args)
+{
+	char * wisdom;
+	PyObject * pyBytes;
+
+	if (!PyArg_ParseTuple (args, ""))
+		return NULL;
+	wisdom = fftw_export_wisdom_to_string();
+	pyBytes = PyByteArray_FromStringAndSize(wisdom, strlen(wisdom));
+	free(wisdom);
+	return pyBytes;
 }
 	
 static PyObject * set_params(PyObject * self, PyObject * args, PyObject * keywds)
@@ -3076,10 +3171,12 @@ static PyObject * get_hermes_TFRC(PyObject * self, PyObject * args)
 		hermes_rev_power  = 0.0;
 		hermes_pa_current  = 0.0;
 	}
-	ret = Py_BuildValue("dddd", hermes_temperature, hermes_fwd_power, hermes_rev_power, hermes_pa_current);
+	ret = Py_BuildValue("dddddd", hermes_temperature, hermes_fwd_power, hermes_rev_power, hermes_pa_current, hermes_fwd_peak, hermes_rev_peak);
 	hermes_temperature = 0;
 	hermes_fwd_power = 0;
 	hermes_rev_power = 0;
+	hermes_fwd_peak = 0;
+	hermes_rev_peak = 0;
 	hermes_pa_current = 0;
 	hermes_count_temperature = 0;
 	hermes_count_current = 0;
@@ -3429,6 +3526,7 @@ static int read_rx_udp10(complex double * samp)	// Read samples from UDP using t
 	unsigned char buf[1500];
 	unsigned int seq;
 	unsigned int hlwp = 0;
+	unsigned int power;
 	static unsigned int seq0;
 	static int tx_records;
 	static int max_multirx_count=0;
@@ -3443,7 +3541,7 @@ static int read_rx_udp10(complex double * samp)	// Read samples from UDP using t
 		quisk_rx_udp_started = 0;
 		multirx_fft_next_index = 0;
 		multirx_fft_next_state = 0;
-		for (i = 0; i < QUISK_MAX_RECEIVERS; i++)
+		for (i = 0; i < QUISK_MAX_SUB_RECEIVERS; i++)
 			multirx_fft_data[i].index = 0;
 		return 0;
 	}
@@ -3566,7 +3664,7 @@ static int read_rx_udp10(complex double * samp)	// Read samples from UDP using t
 						quisk_hermeslite_writeattempts = 0;
 					} 
 				} else {
-					QuiskPrintf("ERROR: Unexpected Hermes-Lite response %d seen\n",dindex);
+					QuiskPrintf("ERROR: Unexpected Hermes-Lite response 0x%X seen\n",dindex);
 				}
 			} else {
 				dindex = dindex >> 2;
@@ -3593,12 +3691,16 @@ static int read_rx_udp10(complex double * samp)	// Read samples from UDP using t
 			}
 			else if(dindex == 1) {	// temperature and forward power
 				hermes_temperature += quisk_hermes_to_pc[4] << 8 | quisk_hermes_to_pc[5];
-				hermes_fwd_power   += quisk_hermes_to_pc[6] << 8 | quisk_hermes_to_pc[7];
+				power = quisk_hermes_to_pc[6] << 8 | quisk_hermes_to_pc[7];
+				hermes_fwd_power += power;
+				hermes_fwd_peak = fmax(hermes_fwd_peak, (double)power);
 				hermes_count_temperature++;
 			}
 			else if (dindex == 2) {	// reverse power and current
-				hermes_rev_power   += quisk_hermes_to_pc[8] << 8 | quisk_hermes_to_pc[9];
-				hermes_pa_current  += quisk_hermes_to_pc[10] << 8 | quisk_hermes_to_pc[11];
+				power = quisk_hermes_to_pc[8] << 8 | quisk_hermes_to_pc[9];
+				hermes_rev_power += power;
+				hermes_rev_peak = fmax(hermes_rev_peak, (double)power);
+				hermes_pa_current += quisk_hermes_to_pc[10] << 8 | quisk_hermes_to_pc[11];
 				hermes_count_current++;
 			}
 			// convert 24-bit samples to 32-bit samples; int must be 32 bits.
@@ -3917,8 +4019,8 @@ static PyObject * open_sound(PyObject * self, PyObject * args)
 	//	quisk_mic_preemphasis = 1.0;
 	quisk_mic_clip = QuiskGetConfigDouble("mic_clip", 3.0);
 	agc_release_time = QuiskGetConfigDouble("agc_release_time", 1.0);
-	strncpy(quisk_sound_state.mic_ip, mip, IP_SIZE);
-	strncpy(quisk_sound_state.IQ_server, QuiskGetConfigString("IQ_Server_IP", ""), IP_SIZE);
+	strMcpy(quisk_sound_state.mic_ip, mip, IP_SIZE);
+	strMcpy(quisk_sound_state.IQ_server, QuiskGetConfigString("IQ_Server_IP", ""), IP_SIZE);
 	quisk_sound_state.verbose_sound = quisk_sound_state.verbose_pulse = QuiskGetConfigInt("pulse_audio_verbose_output", 0);
 	fft_error = 0;
 	quisk_open_sound();
@@ -3929,75 +4031,41 @@ static PyObject * open_sound(PyObject * self, PyObject * args)
 static void configure_sound_thread(int job)   // called from the sound thread except for job == 1
 {
 #ifdef MS_WINDOWS
-	DWORD taskIndex = 0;
-        if (job == 0) {         // start sound thread
-		if (AvSetMmThreadCharacteristics(TEXT("Audio"), &taskIndex) == NULL && quisk_sound_state.verbose_sound)
-			QuiskPrintf("Failed to set thread to Audio\n");
-	}
-#endif
-#if 0
-	//DWORD taskIndex = 0;
+	DWORD taskIndex;
 	TIMECAPS tcaps;
-	static UINT timer_res;   // timer resolution in milliseconds;
-	static int high_res = -1;       // -1 means not started yet
-	UINT poll;
+	static UINT timer_msec;   // timer resolution in milliseconds;
 
 	switch (job) {
-	case 0:	 // start sound thread
+        case 0:         // start sound thread
+#if 0
 		if (SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS) == 0)
 			if (quisk_sound_state.verbose_sound)
 				QuiskPrintf("Failed to set class priority\n");
 		if (SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) == 0)
 			if (quisk_sound_state.verbose_sound)
 				QuiskPrintf("Failed to set thread priority\n");
-		if (AvSetMmThreadCharacteristics(TEXT("Audio"), &taskIndex) == NULL && quisk_sound_state.verbose_sound)
-			QuiskPrintf("Failed to set thread to Audio\n");
-		if (timeGetDevCaps(&tcaps, sizeof(TIMECAPS)) == MMSYSERR_NOERROR)
-			timer_res = tcaps.wPeriodMin;
-		else
-			timer_res = 5;
-		poll = ((UINT)quisk_sound_state.data_poll_usec + 500) / 1000;
-		if (timer_res < poll)
-			timer_res = poll;
-		if (timer_res < 4)
-			timer_res = 4;
+#endif
+		taskIndex = 0;
+		if (AvSetMmThreadCharacteristics(TEXT("Pro Audio"), &taskIndex) == 0 && quisk_sound_state.verbose_sound)
+			QuiskPrintf("Failed to set sound thread to Pro Audio\n");
+		timer_msec = 5;
+		if (timeGetDevCaps(&tcaps, sizeof(TIMECAPS)) == MMSYSERR_NOERROR) {
+			if (timer_msec < tcaps.wPeriodMin)
+				timer_msec = tcaps.wPeriodMin;
+			else if (timer_msec > tcaps.wPeriodMax)
+				timer_msec = tcaps.wPeriodMax;
+		}
 		if (quisk_sound_state.verbose_sound)
-			QuiskPrintf("Timer resolution %u\n", timer_res);
-		high_res = 0;
-		break;
-	case 1:	 // update
-		if (high_res < 0 ) {    // not started
-			;
-		}
-		else if (rxMode == CWL || rxMode == CWU) {
-			if ( ! high_res) {
-				high_res = 1;
-				if (timeBeginPeriod(timer_res) != TIMERR_NOERROR && quisk_sound_state.verbose_sound)
-					QuiskPrintf ("Failed to set timer resolution to %u\n", timer_res);
-				//if (quisk_sound_state.verbose_sound)
-				//	QuiskPrintf("Change sound thread to high resolution\n");
-			}
-		}
-		else {
-			if (high_res) {
-				high_res = 0;
-				if (timeEndPeriod(timer_res) != TIMERR_NOERROR && quisk_sound_state.verbose_sound)
-					QuiskPrintf ("Failed to clear timer resolution\n");
-				//if (quisk_sound_state.verbose_sound)
-				//	QuiskPrintf("Change sound thread to low resolution\n");
-			}
-		}
-		break;
-	case 2:	 // stop sound thread
-		//SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
-		if (high_res == 1) {
-			if (timeEndPeriod(timer_res) != TIMERR_NOERROR && quisk_sound_state.verbose_sound)
-				QuiskPrintf ("Failed to clear timer resolution\n");
-			//if (quisk_sound_state.verbose_sound)
-			//	QuiskPrintf("Close sound thread to low resolution\n");
-		}
-		high_res = -1;
-		break;
+			QuiskPrintf("Set Windows timer resolution to %u milliseconds\n", timer_msec);
+		if (timeBeginPeriod(timer_msec) != TIMERR_NOERROR && quisk_sound_state.verbose_sound)
+			QuiskPrintf ("Failed to set timer resolution to %u\n", timer_msec);
+                break;
+        case 1:		// change rxMode
+                break;
+        case 2:		// stop sound thread
+		if (timeEndPeriod(timer_msec) != TIMERR_NOERROR && quisk_sound_state.verbose_sound)
+			QuiskPrintf ("Failed to clear timer resolution\n");
+                break;
 	}
 #endif
 }
@@ -4093,6 +4161,10 @@ static PyObject * read_sound(PyObject * self, PyObject * args)
 	if (!PyArg_ParseTuple (args, ""))
 		return NULL;
 Py_BEGIN_ALLOW_THREADS
+	if (quisk_close_file_play) {
+		quisk_close_file_play = 0;
+		wav_files_close();
+	}
 	n = quisk_read_sound();
 Py_END_ALLOW_THREADS
 	return PyInt_FromLong(n);
@@ -4120,12 +4192,7 @@ static PyObject * mixer_set(PyObject * self, PyObject * args)
 	if (!PyArg_ParseTuple (args, "siO", &card_name, &numid, &value))
 		return NULL;
 
-	err_msg[0] = 0;  // default in case we have no mixer
-#if defined(QUISK_HAVE_DIRECTX) || defined(QUISK_HAVE_ALSA)
-	quisk_mixer_set(card_name, numid, value, err_msg, QUISK_SC_SIZE);
-#else
-	err_msg[0] = 0;  // default in case we have no mixer
-#endif
+	quisk_alsa_mixer_set(card_name, numid, value, err_msg, QUISK_SC_SIZE);
 	return PyString_FromString(err_msg);
 }
 
@@ -4499,13 +4566,26 @@ static PyObject * ImmediateChange(PyObject * self, PyObject * args)	// called fr
 	if (!PyArg_ParseTuple (args, "s", &name))
 		return NULL;
 	if ( ! strcmp(name, "keyupDelay")) {
-		quiskKeyupDelay = QuiskGetConfigInt(name,  23);
+		quisk_sound_state.quiskKeyupDelay = QuiskGetConfigInt(name,  23);
 	}
 	else if ( ! strcmp(name, "cwTone")) {
 		quisk_sidetoneFreq = QuiskGetConfigInt(name,  700);
 	}
 	else if ( ! strcmp(name, "pulse_audio_verbose_output")) {
 		quisk_sound_state.verbose_sound = quisk_sound_state.verbose_pulse = QuiskGetConfigInt(name,  0);
+	}
+	else if ( ! strcmp(name, "start_cw_delay")) {
+		quisk_start_cw_delay = QuiskGetConfigInt(name, 15);
+		if (quisk_start_cw_delay < 0)
+			quisk_start_cw_delay = 0;
+		else if (quisk_start_cw_delay > START_CW_DELAY_MAX)
+			quisk_start_cw_delay = START_CW_DELAY_MAX;
+	}
+	else if ( ! strcmp(name, "start_ssb_delay")) {
+		quisk_start_ssb_delay = QuiskGetConfigInt(name, 100);
+	}
+	else if ( ! strcmp(name, "maximum_tx_secs")) {
+		maximum_tx_secs = QuiskGetConfigInt(name, 0);
 	}
 	Py_INCREF (Py_None);
 	return Py_None;
@@ -4529,7 +4609,7 @@ static PyObject * set_tune(PyObject * self, PyObject * args)
 
 static PyObject * set_sidetone(PyObject * self, PyObject * args)
 {
-	if (!PyArg_ParseTuple (args, "idii", &quisk_sidetoneCtrl, &quisk_sidetoneVolume, &rit_freq, &quiskKeyupDelay))
+	if (!PyArg_ParseTuple (args, "idii", &quisk_sidetoneCtrl, &quisk_sidetoneVolume, &rit_freq, &quisk_sound_state.quiskKeyupDelay))
 		return NULL;
 	sidetonePhase = cexp((I * 2.0 * M_PI * abs(rit_freq)) / quisk_sound_state.playback_rate);
 	if (rxMode == CWL || rxMode == CWU)
@@ -4621,6 +4701,19 @@ static PyObject * set_hardware_cwkey(PyObject * self, PyObject * args)
 	return Py_None;
 }
 
+static PyObject * set_remote_cwkey(PyObject * self, PyObject * args)
+{
+	if (!PyArg_ParseTuple (args, "i", &quisk_remote_cwkey))
+		return NULL;
+	if (quisk_remote_cwkey != old_remote_cwkey) {
+		old_remote_cwkey = quisk_remote_cwkey;
+		quisk_set_play_state();
+		//if (quisk_remote_cwkey) QuiskPrintTime("set remote cwkey", 0);
+	}
+	Py_INCREF (Py_None);
+	return Py_None;
+}
+
 static PyObject * set_PTT(PyObject * self, PyObject * args)
 {
 	if (!PyArg_ParseTuple (args, "i", &is_PTT_down))
@@ -4636,7 +4729,7 @@ static PyObject * set_multirx_mode(PyObject * self, PyObject * args)
 
 	if (!PyArg_ParseTuple (args, "ii", &index, &mode))
 		return NULL;
-	if (index < QUISK_MAX_RECEIVERS)
+	if (index < QUISK_MAX_SUB_RECEIVERS)
 		multirx_mode[index] = mode;
 	Py_INCREF (Py_None);
 	return Py_None;
@@ -4648,7 +4741,7 @@ static PyObject * set_multirx_freq(PyObject * self, PyObject * args)
 
 	if (!PyArg_ParseTuple (args, "ii", &index, &freq))
 		return NULL;
-	if (index < QUISK_MAX_RECEIVERS)
+	if (index < QUISK_MAX_SUB_RECEIVERS)
 		multirx_freq[index] = freq;
 	Py_INCREF (Py_None);
 	return Py_None;
@@ -4666,7 +4759,7 @@ static PyObject * set_multirx_play_channel(PyObject * self, PyObject * args)
 {
 	if (!PyArg_ParseTuple (args, "i", &multirx_play_channel))
 		return NULL;
-	if (multirx_play_channel >= QUISK_MAX_RECEIVERS)
+	if (multirx_play_channel >= QUISK_MAX_SUB_RECEIVERS)
 		multirx_play_channel = -1;
 	Py_INCREF (Py_None);
 	return Py_None;
@@ -4736,14 +4829,39 @@ static PyObject * get_multirx_graph(PyObject * self, PyObject * args)	// Called 
 	return retrn;
 }
 
+void copy2pixels(double * pixels, int n_pixels, double * fft, int fft_size, double zoom, double deltaf, double rate)
+{
+	int i, j, j1, j2;
+	double f1, d1, d2, sample;
+
+	f1 = deltaf + rate / 2.0 * (1.0 - zoom);	// frequency at left of graph
+	for (i = 0; i < n_pixels; i++) {	// for each pixel
+		// freq = f1 + pixel / n_pixels * zoom * rate = rate * fft_index / fft_size
+		d1 = fft_size / rate * (f1 + (double)i / n_pixels * zoom * rate);
+		d2 = fft_size / rate * (f1 + (double)(i + 1) / n_pixels * zoom * rate);
+		j1 = floor(d1);
+		j2 = floor(d2);
+		if (j1 == j2) {
+			sample = (d2 - d1) * fft[j1];
+		}
+		else {
+			sample = (j1 + 1 - d1) * fft[j1];
+			for (j = j1 + 1; j < j2; j++)
+				sample += fft[j];
+			sample += (d2 - j2) * fft[j2];
+		}
+		pixels[i] = sample;
+	}
+}
+
 static PyObject * get_bandscope(PyObject * self, PyObject * args)	// Called by the GUI thread
 {
-	int i, j, j1, j2, L, clock;
-	double zoom, deltaf, rate, f1;
+	int i, L, clock;
+	double zoom, deltaf, rate;
 	static int fft_count = 0;
 	static double the_max = 0;
 	static double time0=0;			// time of last graph
-	double d1, d2, sample, frac, scale;
+	double d1, sample, frac, scale;
 	PyObject * tuple2;
 
 	if (!PyArg_ParseTuple (args, "idd", &clock, &zoom, &deltaf))
@@ -4770,23 +4888,9 @@ static PyObject * get_bandscope(PyObject * self, PyObject * args)	// Called by t
 			frac = (double)L / graph_width;
 			scale = 1.0 / frac / fft_count / bandscope_size;
 			rate = clock / 2.0;
+			copy2pixels(bandscopePixels, graph_width, bandscopeAverage, L, zoom, deltaf, rate);
 			for (i = 0; i < graph_width; i++) {	// for each pixel
-				f1 = deltaf + rate / 2.0 * (1.0 - zoom);	// frequency at left of graph
-				// freq = f1 + pixel / graph_width + zoom * rate = rate * fft_index / L
-				d1 = L / rate * (f1 + (double)i / graph_width * zoom * rate);
-				d2 = L / rate * (f1 + (double)(i + 1) / graph_width * zoom * rate);
-				j1 = floor(d1);
-				j2 = floor(d2);
-				if (j1 == j2) {
-					sample = (d2 - d1) * bandscopeAverage[j1];
-				}
-				else {
-					sample = (j1 + 1 - d1) * bandscopeAverage[j1];
-					for (j = j1 + 1; j < j2; j++)
-						sample += bandscopeAverage[j];
-					sample += (d2 - j2) * bandscopeAverage[j2];
-				}
-				sample = sample * scale;
+				sample = bandscopePixels[i] * scale;
 				if (sample <= 1E-10)
 					sample = -200.0;
 				else
@@ -4811,19 +4915,20 @@ static PyObject * get_graph(PyObject * self, PyObject * args)	// Called by the G
 	int i, j, k, m, n, index, ffts, ii, mm, m0, deltam;
 	fft_data * ptFft;
 	PyObject * tuple2;
-	double d1, d2, scale, zoom, deltaf;
+	double d1, d2, scale, smeter_scale, zoom, deltaf;
 	complex double c;
-	static double meter = 0;		// RMS s-meter
-	static int use_fft = 1;			// Use the FFT, or return raw data
+	static double meter = 0;	// RMS s-meter
+	static int job = 1;		// job==0 return raw data ; 1 return FFT ; 2 delete FFT data
 	static double * fft_avg=NULL;	// Array to average the FFT
 	static double * fft_tmp;
 	static int count_fft=0;			// how many fft's have occurred (for average)
 	static double time0=0;			// time of last graph
+	static double time_send_graph;		// time of the last send_graph_data()
 
 	if (!PyArg_ParseTuple (args, "idd", &k, &zoom, &deltaf))
 		return NULL;
-	if (k != use_fft) {		// change in data return type; re-initialize
-		use_fft = k;
+	if (k != job) {		// change in data return type; re-initialize
+		job = k;
 		count_fft = 0;
 	}
 	if ( ! fft_avg) {
@@ -4831,6 +4936,22 @@ static PyObject * get_graph(PyObject * self, PyObject * args)	// Called by the G
 		fft_tmp = (double *) malloc(sizeof(double) * fft_size);
 		for (i = 0; i < fft_size; i++)
 			fft_avg[i] = 0;
+	}
+	if (remote_control_head) {
+		n = receive_graph_data(fft_avg);
+		if (n == data_width) {
+			tuple2 = PyTuple_New(data_width);
+			for (i = 0; i < data_width; i++)
+				PyTuple_SetItem(tuple2, i, PyFloat_FromDouble(fft_avg[i]));
+			return tuple2;
+		}
+		job = 2;
+	}
+	if (remote_control_slave) {
+		if (QuiskTimeSec() - time_send_graph > 1.0) {
+			time_send_graph = QuiskTimeSec();
+			send_graph_data(NULL, 0, 0.0, 0.0, 0, 0.0);
+		}
 	}
 	// Process all FFTs that are ready to run.
 	index = fft_data_index;		// oldest data first - FIFO
@@ -4846,13 +4967,17 @@ static PyObject * get_graph(PyObject * self, PyObject * args)	// Called by the G
 			ptFft->filled = 0;
 			continue;
 		}
-		if ( ! use_fft) {		// return raw data, not FFT
+		if (job == 0) {		// return raw data, not FFT
 			tuple2 = PyTuple_New(data_width);
 			for (i = 0; i < data_width; i++)
 				PyTuple_SetItem(tuple2, i,
 					PyComplex_FromDoubles(creal(ptFft->samples[i]), cimag(ptFft->samples[i])));
 			ptFft->filled = 0;
 			return tuple2;
+		}
+		if (job == 2) {		// delete data
+			ptFft->filled = 0;
+			continue;
 		}
 		// Continue with FFT calculation
 		for (i = 0; i < fft_size; i++)		// multiply by window
@@ -4918,6 +5043,13 @@ static PyObject * get_graph(PyObject * self, PyObject * args)	// Called by the G
 		ptFft->filled = 0;
 		if (count_fft > 0 && QuiskTimeSec() - time0 >= 1.0 / graph_refresh) {
 			// We have averaged enough fft's to return the graph data.
+			scale = 1.0 / 2147483647.0 / fft_size;
+			// scale = 1.0 / count_fft / fft_size;	// Divide by sample count
+			// scale /= pow(2.0, 31);			// Normalize to max == 1
+			scale = log10(count_fft) + log10(fft_size) + 31.0 * log10(2.0);
+			scale *= 20.0;
+			if (remote_control_slave)	// Send graph data to the control head
+				send_graph_data(fft_avg, fft_size, zoom, deltaf, fft_sample_rate, scale);
 			// Average the fft data of size fft_size into the size of data_width.
 			n = (int)(zoom * (double)fft_size / data_width + 0.5);
 			if (n < 1)
@@ -4932,8 +5064,8 @@ static PyObject * get_graph(PyObject * self, PyObject * args)	// Called by the G
 						d2 += fft_avg[k];
 				fft_avg[i] = d2;
 			}
-			scale = 1.0 / 2147483647.0 / fft_size;
-			Smeter = meter * scale * scale / count_fft;		// record the new s-meter value
+			smeter_scale = 1.0 / 2147483647.0 / fft_size;
+			Smeter = meter * smeter_scale * smeter_scale / count_fft;		// record the new s-meter value
 			meter = 0;
 			if (Smeter > 1E-16)
 				Smeter = 10.0 * log10(Smeter);
@@ -4943,21 +5075,19 @@ static PyObject * get_graph(PyObject * self, PyObject * args)	// Called by the G
 			// into adjacent bins. It is the amplitude that is spread out, not the squared amplitude.
 			Smeter += 4.25969;
 			tuple2 = PyTuple_New(data_width);
-			// scale = 1.0 / count_fft / fft_size;	// Divide by sample count
-			// scale /= pow(2.0, 31);			// Normalize to max == 1
-			scale = log10(count_fft) + log10(fft_size) + 31.0 * log10(2.0);
-			scale *= 20.0;
 			for (i = 0; i < data_width; i++) {
 				d2 = 20.0 * log10(fft_avg[i]) - scale;
 				if (d2 < -200)
 					d2 = -200;
-				current_graph[i] = d2;
+				else if (d2 > 0)
+					d2 = 0;
+				current_graph[i] = d2;	// graph values are -200.0 to 0.0
 				PyTuple_SetItem(tuple2, i, PyFloat_FromDouble(d2));
 			}
 			for (i = 0; i < fft_size; i++)
 				fft_avg[i] = 0;
 			count_fft = 0;
-			time0 = QuiskTimeSec();
+			time0 = time_send_graph = QuiskTimeSec();
 			return tuple2;
 		}
 	}
@@ -5202,6 +5332,15 @@ static PyObject * get_filter(PyObject * self, PyObject * args)
 	return tuple2;
 }
 
+static PyObject * quisk_control_midi(PyObject * self, PyObject * args, PyObject * keywds)
+{
+#ifdef QUISK_HAVE_ALSA
+	return quisk_alsa_control_midi(self, args, keywds);
+#else
+	return quisk_wasapi_control_midi(self, args, keywds);
+#endif
+}
+
 static void measure_freq(complex double * cSamples, int nSamples, int srate)
 {
 	int i, k, center, ipeak;
@@ -5382,6 +5521,16 @@ static PyObject * dft(PyObject * self, PyObject * args)
 	return Xdft(tuple2, 0, window);
 }
 
+static PyObject * is_cwkey_down(PyObject * self, PyObject * args)
+{
+	if (!PyArg_ParseTuple (args, ""))
+		return NULL;
+	if (QUISK_CWKEY_DOWN)
+		return PyInt_FromLong(1);
+	else
+		return PyInt_FromLong(0);
+}
+
 static PyObject * is_key_down(PyObject * self, PyObject * args)
 {
 	if (!PyArg_ParseTuple (args, ""))
@@ -5430,18 +5579,29 @@ static void set_stone(void)
 }
 
 #define IS_HW_CWKEY	quisk_hardware_cwkey
-#define IS_SW_CWKEY	(quisk_serial_key_down || quisk_midi_cwkey)
+#define IS_SW_CWKEY	(quisk_serial_key_down || quisk_midi_cwkey || quisk_remote_cwkey)
 #define IS_HW_PTT	hardware_ptt
-#define IS_SW_PTT	(key_is_down || is_PTT_down)
+#define IS_SW_PTT	(quisk_serial_ptt || key_is_down || is_PTT_down)
 
 void quisk_set_play_state(void)
 {
-	static double Time0;
+	static double Time0;			// Timer to change to RX after the key goes up. CW hang time and PTT.
+	static double TimeoutTimer = 1E30;	// Timer for maximum Tx time limit.
+	//static int change = 0;
+	//int i;
 
+	if (IS_HW_CWKEY && quisk_play_state != HARDWARE_CWKEY) {	// work around HL2 gateware bug that uses CWX when key goes down
+		Time0 = TimeoutTimer = QuiskTimeSec();
+		quisk_play_state = HARDWARE_CWKEY;
+		set_stone();
+		quisk_play_sidetone(&quisk_Playback);
+		hermes_mox_bit = 0;
+	}
 	switch (quisk_play_state) {
 	case SHUTDOWN:
 		Time0 = QuiskTimeSec();
 		quisk_active_sidetone = 0;
+		hermes_mox_bit = 0;
 		break;
 	case STARTING:
 		quisk_active_sidetone = 0;
@@ -5450,72 +5610,92 @@ void quisk_set_play_state(void)
 	                if (quisk_sound_state.verbose_sound)
                                 QuiskPrintf("Change from state Starting to Receive\n");
 		}
+		hermes_mox_bit = 0;
 		break;
 	case RECEIVE:
 		quisk_active_sidetone = 0;
 		if (rxMode == CWU || rxMode == CWL) {
 			if (key_is_down) {
-				Time0 = QuiskTimeSec();
+				Time0 = TimeoutTimer = QuiskTimeSec();
 				quisk_play_state = SOFTWARE_PTT;
-			}
-			else if (IS_HW_CWKEY) {
-				Time0 = QuiskTimeSec();
-				quisk_play_state = HARDWARE_CWKEY;
-				set_stone();
-				quisk_play_sidetone(&quisk_Playback);
+				hermes_mox_bit = 1;
 			}
 			else if (IS_SW_CWKEY) {
-				Time0 = QuiskTimeSec();
+				Time0 = TimeoutTimer = QuiskTimeSec();
 				quisk_play_state = SOFTWARE_CWKEY;
 				set_stone();
 				quisk_play_sidetone(&quisk_Playback);
+				hermes_mox_bit = 1;
 			}
 		}
 		else {
 			if (IS_HW_PTT) {
-				Time0 = QuiskTimeSec();
+				Time0 = TimeoutTimer = QuiskTimeSec();
 				quisk_play_state = HARDWARE_PTT;
+				hermes_mox_bit = 1;
 			}
 			else if (IS_SW_PTT) {
-				Time0 = QuiskTimeSec();
+				Time0 = TimeoutTimer = QuiskTimeSec();
 				quisk_play_state = SOFTWARE_PTT;
+				hermes_mox_bit = 1;
 			}
 		}
 		break;
 	case HARDWARE_CWKEY:
 		if (IS_HW_CWKEY)
 			Time0 = QuiskTimeSec();
-		else if (QuiskTimeSec() - Time0 >= quiskKeyupDelay * 1E-3) {
+		else if (QuiskTimeSec() - Time0 >= quisk_sound_state.quiskKeyupDelay * 1E-3) {
 			quisk_play_state = RECEIVE;
 			quisk_play_sidetone(&quisk_Playback);
 			quisk_active_sidetone = 0;
+			hermes_mox_bit = 0;
 		}
 		break;
 	case SOFTWARE_CWKEY:
 		if (IS_SW_CWKEY)
 			Time0 = QuiskTimeSec();
-		else if (QuiskTimeSec() - Time0 >= quiskKeyupDelay * 1E-3) {
+		else if (QuiskTimeSec() - Time0 >= quisk_sound_state.quiskKeyupDelay * 1E-3) {
 			quisk_play_state = RECEIVE;
 			quisk_play_sidetone(&quisk_Playback);
 			quisk_active_sidetone = 0;
+			hermes_mox_bit = 0;
 		}
 		break;
 	case HARDWARE_PTT:
 		quisk_active_sidetone = 0;
 		if (IS_HW_PTT)
 			Time0 = QuiskTimeSec();
-		else if (QuiskTimeSec() - Time0 >= 50E-3)
+		else if (QuiskTimeSec() - Time0 >= 50E-3) {
 			quisk_play_state = RECEIVE;
+			hermes_mox_bit = 0;
+		}
 		break;
 	case SOFTWARE_PTT:
 		quisk_active_sidetone = 0;
 		if (IS_SW_PTT)
 			Time0 = QuiskTimeSec();
-		else if (QuiskTimeSec() - Time0 >= 50E-3)
+		else if (QuiskTimeSec() - Time0 >= 50E-3) {
 			quisk_play_state = RECEIVE;
+			hermes_mox_bit = 0;
+		}
 		break;
 	}
-	//QuiskPrintf("quisk_play_state end %d ptt %d\n", quisk_play_state, is_PTT_down);
+	if (maximum_tx_secs && quisk_play_state > RECEIVE && QuiskTimeSec() - TimeoutTimer >= maximum_tx_secs) {
+		quisk_hardware_cwkey = 0;
+		quisk_serial_key_down = 0;
+		quisk_serial_ptt = 0;
+		quisk_midi_cwkey = 0;
+		hardware_ptt = 0;
+		key_is_down = 0;
+		is_PTT_down = 0;
+		hermes_mox_bit = 0;
+	}
+	//i = quisk_play_state + hermes_mox_bit * 19 + IS_HW_PTT * 100 + IS_HW_CWKEY * 1000 + IS_SW_PTT * 10000 + IS_SW_CWKEY * 100000;
+	//if (i != change) {
+	//	change = i;
+	//	QuiskPrintf("quisk_play_state %d hermes_mox_bit %d IS_HW_PTT %d IS_HW_CWKEY %d IS_SW_PTT %d IS_SW_CWKEY %d\n",
+	//		quisk_play_state, hermes_mox_bit, IS_HW_PTT, IS_HW_CWKEY, IS_SW_PTT, IS_SW_CWKEY);
+	//}
 }
 
 static PyObject * record_app(PyObject * self, PyObject * args)
@@ -5525,12 +5705,15 @@ static PyObject * record_app(PyObject * self, PyObject * args)
 	fftw_complex * pt;
 	char * name;
         const char * utf8 = "utf-8";
+	Py_ssize_t l1;
 
-	if (!PyArg_ParseTuple (args, "OOiiiiikes", &pyApp, &quisk_pyConfig, &data_width, &graph_width,
-		&fft_size, &multirx_data_width, &rate, &handle, utf8, &name))
+	name = malloc(QUISK_SC_SIZE);
+	l1 = QUISK_SC_SIZE;
+	if (!PyArg_ParseTuple (args, "OOiiiiikes#", &pyApp, &quisk_pyConfig, &data_width, &graph_width,
+		&fft_size, &multirx_data_width, &rate, &handle, utf8, &name, &l1))
 		return NULL;
-	strncpy(fftw_wisdom_name, name, QUISK_SC_SIZE);
-        PyMem_Free(name);
+	strMcpy(fftw_wisdom_name, name, QUISK_SC_SIZE);
+        free(name);
 
 	Py_INCREF(quisk_pyConfig);
 
@@ -5548,6 +5731,9 @@ static PyObject * record_app(PyObject * self, PyObject * args)
 	quisk_sidetoneFreq = QuiskGetConfigInt("cwTone", 700);
 	waterfall_scroll_mode = QuiskGetConfigInt("waterfall_scroll_mode", 1);
 	quisk_use_sidetone = QuiskGetConfigInt("use_sidetone", 0);
+	quisk_start_cw_delay = QuiskGetConfigInt("start_cw_delay", 15);
+	quisk_start_ssb_delay = QuiskGetConfigInt("start_ssb_delay", 100);
+	maximum_tx_secs = QuiskGetConfigInt("maximum_tx_secs", 0);
 	quisk_sound_state.sample_rate = rate;
 	fft_sample_rate = rate;
 	is_little_endian = 1;	// Test machine byte order
@@ -5555,7 +5741,7 @@ static PyObject * record_app(PyObject * self, PyObject * args)
 		is_little_endian = 1;
 	else
 		is_little_endian = 0;
-	strncpy (quisk_sound_state.err_msg, CLOSED_TEXT, QUISK_SC_SIZE);
+	strMcpy (quisk_sound_state.err_msg, CLOSED_TEXT, QUISK_SC_SIZE);
 	// Initialize space for the FFTs
 	for (i = 0; i < FFT_ARRAY_SIZE; i++) {
 		fft_data_array[i].filled = 0;
@@ -5648,6 +5834,7 @@ static PyMethodDef QuiskMethods[] = {
 	{"dft", dft, METH_VARARGS, "Calculate the discrete Fourier transform."},
 	{"idft", idft, METH_VARARGS, "Calculate the inverse discrete Fourier transform."},
 	{"is_key_down", is_key_down, METH_VARARGS, "Check whether the key is down; return 0 or 1."},
+	{"is_cwkey_down", is_cwkey_down, METH_VARARGS, "Check whether the CW key is down; return 0 or 1."},
 	{"get_state", get_state, METH_VARARGS, "Return a count of read and write errors."},
 	{"get_graph", get_graph, METH_VARARGS, "Return a tuple of graph data."},
 	{"get_bandscope", get_bandscope, METH_VARARGS, "Return a tuple of bandscope data."},
@@ -5668,8 +5855,6 @@ static PyMethodDef QuiskMethods[] = {
 	{"get_hermes_TFRC", get_hermes_TFRC, METH_VARARGS, "Return the temperature, forward and reverse power and PA current."},
 	{"set_hermes_id", set_hermes_id, METH_VARARGS, "Set the Hermes hardware code version and board ID."},
 	{"set_hermes_filters", quisk_set_hermes_filter, METH_VARARGS, "Set the Hermes filter to use for Rx and Tx."},
-	{"set_alex_hpf", quisk_set_alex_hpf, METH_VARARGS, "Set the Alex HP filter to use for Rx and Tx."},
-	{"set_alex_lpf", quisk_set_alex_lpf, METH_VARARGS, "Set the Alex LP filter to use for Rx and Tx."},
 	{"invert_spectrum", invert_spectrum, METH_VARARGS, "Invert the input RF spectrum"},
 	{"ip_interfaces", ip_interfaces, METH_VARARGS, "Return a list of interface data"},
 	{"pc_to_hermes", pc_to_hermes, METH_VARARGS, "Send this block of control data to the Hermes device"},
@@ -5705,7 +5890,7 @@ static PyMethodDef QuiskMethods[] = {
 	{"set_imd_level", set_imd_level, METH_VARARGS, "Set the imd level 0 to 1000."},
 	{"set_sidetone", set_sidetone, METH_VARARGS, "Set the sidetone volume and frequency."},
 	{"set_sample_bytes", set_sample_bytes, METH_VARARGS, "Set the number of bytes for each I or Q sample."},
-	{"set_transmit_mode", set_transmit_mode, METH_VARARGS, "Change the radio to transmit mode independent of key_down."},
+	{"XXset_transmit_mode", set_transmit_mode, METH_VARARGS, "Change the radio to transmit mode independent of key_down."},
 	{"set_volume", set_volume, METH_VARARGS, "Set the audio output volume."},
 	{"set_tx_audio", (PyCFunction)quisk_set_tx_audio, METH_VARARGS|METH_KEYWORDS, "Set the transmit audio parameters."},
 	{"is_vox", quisk_is_vox, METH_VARARGS, "return the VOX state zero or one."},
@@ -5716,9 +5901,11 @@ static PyMethodDef QuiskMethods[] = {
 	{"test_3", test_3, METH_VARARGS, "Test 3 function."},
 	{"tx_hold_state", tx_hold_state, METH_VARARGS, "Query or set the transmit hold state."},
 	{"set_fdx", set_fdx, METH_VARARGS, "Set full duplex mode; ignore the key status."},
-#ifdef MS_WINDOWS
+	{"directx_sound_devices", quisk_directx_sound_devices, METH_VARARGS, "Return a list of available DirectX sound device names."},
 	{"wasapi_sound_devices", quisk_wasapi_sound_devices, METH_VARARGS, "Return a list of available WASAPI sound device names."},
-#endif
+	{"portaudio_sound_devices", quisk_portaudio_sound_devices, METH_VARARGS, "Return a list of available PortAudio sound device names."},
+	{"pulseaudio_sound_devices", quisk_pulseaudio_sound_devices, METH_VARARGS, "Return a list of available PulseAudio sound device names."},
+	{"alsa_sound_devices", quisk_alsa_sound_devices, METH_VARARGS, "Return a list of available Alsa sound device names."},
 	{"GetQuiskPrintf", GetQuiskPrintf, METH_VARARGS, "Return the output of our printf() replacement from Windows C."},
 	{"AppStatus", AppStatus, METH_VARARGS, "Perform application initialization."},
 	{"sound_errors", quisk_sound_errors, METH_VARARGS, "Return a list of text strings with sound devices and error counts"},
@@ -5736,7 +5923,7 @@ static PyMethodDef QuiskMethods[] = {
 	{"read_sound", read_sound, METH_VARARGS, "Read from the soundcard."},
 	{"start_sound", start_sound, METH_VARARGS, "Start the soundcard."},
 	{"mixer_set", mixer_set, METH_VARARGS, "Set microphone mixer parameters such as volume."},
-	{"open_key", quisk_open_key, METH_VARARGS, "Open access to the state of the key (CW or PTT)."},
+	{"open_key", (PyCFunction)quisk_open_key, METH_VARARGS|METH_KEYWORDS, "Open access to the state of the key (CW or PTT)."},
 	{"close_key", quisk_close_key, METH_VARARGS, "Close the key."},
 	{"open_rx_udp", open_rx_udp, METH_VARARGS, "Open a UDP port for capture."},
 	{"close_rx_udp", close_rx_udp, METH_VARARGS, "Close the UDP port used for capture."},
@@ -5744,6 +5931,7 @@ static PyMethodDef QuiskMethods[] = {
 	{"add_bscope_samples", add_bscope_samples, METH_VARARGS, "Record the bandscope samples received by Python code."},
 	{"set_key_down", set_key_down, METH_VARARGS, "Change the key up/down state."},
 	{"set_cwkey", set_hardware_cwkey, METH_VARARGS, "Change the CW key up/down state."},
+	{"set_remote_cwkey", set_remote_cwkey, METH_VARARGS, "Change the remote control CW key up/down state."},
 	{"set_PTT", set_PTT, METH_VARARGS, "Record the PTT button state."},
 	{"freedv_open", quisk_freedv_open, METH_VARARGS, "Open FreeDV."},
 	{"freedv_close", quisk_freedv_close, METH_VARARGS, "Close FreeDV."},
@@ -5752,15 +5940,18 @@ static PyMethodDef QuiskMethods[] = {
 	{"freedv_get_rx_char", quisk_freedv_get_rx_char, METH_VARARGS, "Get text characters received from freedv."},
 	{"freedv_set_options", (PyCFunction)quisk_freedv_set_options, METH_VARARGS|METH_KEYWORDS, "Set the freedv parameters."},
 	{"freedv_set_squelch_en", quisk_freedv_set_squelch_en, METH_VARARGS, "Enable or disable FreeDV squelch."},
+	{"wdsp_set_parameter", (PyCFunction)quisk_wdsp_set_parameter, METH_VARARGS|METH_KEYWORDS, "Set parameters for the WDSP SDR library."},
 	{"tmp_record_save", tmp_record_save, METH_VARARGS, "Save the temporary recording in a WAV file."},
 	{"watfall_RgbData", watfall_RgbData, METH_VARARGS, "Return a cookie for the Waterfall pixel data."},
 	{"watfall_OnGraphData", watfall_OnGraphData, METH_VARARGS, "Record a row of Waterfall FFT dB data."},
 	{"watfall_GetPixels", watfall_GetPixels, METH_VARARGS, "Write the Waterfall image to be displayed."},
-#ifdef QUISK_HAVE_PULSEAUDIO
-	{"pa_sound_devices", quisk_pa_sound_devices, METH_VARARGS, "Return a list of available PulseAudio sound device names."},
-#else
-	{"sound_devices", quisk_sound_devices, METH_VARARGS, "Return a list of available sound device names."}
-#endif
+	{"write_fftw_wisdom", write_fftw_wisdom, METH_VARARGS, "Write the current fftw wisdom to the wisdom file."},
+	{"read_fftw_wisdom", read_fftw_wisdom, METH_VARARGS, "Return the current fftw wisdom as a byte array."},
+// Remote Quisk control head and slave by Ben, AC2YD
+	{"start_control_head_remote_sound", quisk_start_control_head_remote_sound, METH_VARARGS, "Start running UDP remote sound on control_head."},
+	{"stop_control_head_remote_sound", quisk_stop_control_head_remote_sound, METH_VARARGS, "Stop running UDP remote sound on control_head."},
+	{"start_remote_radio_remote_sound", quisk_start_remote_radio_remote_sound, METH_VARARGS, "Start running UDP remote sound on remote_radio."},
+	{"stop_remote_radio_remote_sound", quisk_stop_remote_radio_remote_sound, METH_VARARGS, "Stop running UDP remote sound on remote_radio."},
 	{NULL, NULL, 0, NULL}		/* Sentinel */
 };
 

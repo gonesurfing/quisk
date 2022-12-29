@@ -158,7 +158,7 @@ static int quisk_write_samples(complex double * cSamples, int nSamples)
 	for (i = 0; i < nSamples; i++)
 		tx_stream_buffer[i] = cSamples[i] / CLIP16;
 	while (nSamples > 0) {
-		if (nSamples > txMTU)
+		if (nSamples > (int)txMTU)
 			count = txMTU;
 		else
 			count = nSamples;

@@ -393,7 +393,7 @@ class GraphScreen(wx.Window):
     f = float(x - self.x0) * sample_rate / self.data_width
     c = None
     y = originY + 1
-    for freq, color in conf.BandPlan:
+    for freq, color in application.BandPlan:
       freq -= VFO
       if f < freq:
         xend = int(self.x0 + float(freq) * self.data_width / sample_rate + 0.5)
@@ -439,13 +439,13 @@ class GraphScreen(wx.Window):
     for f in range (freq1, freq2, stick):
       x = self.x0 + int(float(f - VFO) / sample_rate * self.data_width)
       if self.originX <= x <= x3:
-        if f % ltick is 0:		# large tick
+        if f % ltick == 0:		# large tick
           dc.DrawLine(x, originY, x, originY + tick2)
-        elif f % mtick is 0:	# medium tick
+        elif f % mtick == 0:	# medium tick
           dc.DrawLine(x, originY, x, originY + tick1)
         else:					# small tick
           dc.DrawLine(x, originY, x, originY + tick0)
-        if f % tfreq is 0:		# place frequency label
+        if f % tfreq == 0:		# place frequency label
           t = str(f//1000)
           w, h = dc.GetTextExtent(t)
           dc.DrawText(t, x - w // 2, originY + tick2)
@@ -662,7 +662,7 @@ class QMainFrame(wx.Frame):
   def SetConfigText(self, text):
     if len(text) > 100:
       text = text[0:80] + '|||' + text[-17:]
-    self.SetTitle("Radio %s   %s   %s" % (configure.Settings[1], self.title, text))
+    self.SetTitle("Radio %s   %s   %s" % (application.local_conf.RadioName, self.title, text))
 
 class Spacer(wx.Window):
   """Create a bar between the graph screen and the controls"""
@@ -850,6 +850,7 @@ class App(wx.App):
   def __init__(self):
     global application
     application = self
+    QS.AppStatus(1)
     self.bottom_widgets = None
     self.is_vna_program = None
     if sys.stdout.isatty():
@@ -866,6 +867,9 @@ class App(wx.App):
     import quisk_conf_defaults as conf
     setattr(conf, 'config_file_path', ConfigPath)
     setattr(conf, 'DefaultConfigDir', DefaultConfigDir)
+    self.QuiskFilesDir = os.path.dirname(conf.settings_file_path)	# directory for Quisk files
+    if not os.path.isdir(self.QuiskFilesDir):
+      self.QuiskFilesDir = DefaultConfigDir
     if os.path.isfile(ConfigPath):	# See if the user has a config file
       setattr(conf, 'config_file_exists', True)
       d = {}
@@ -880,6 +884,7 @@ class App(wx.App):
     else:
       setattr(conf, 'config_file_exists', False)
     # Read in configuration from the selected radio
+    self.BandPlan = []
     if configure: self.local_conf = configure.Configuration(self, argv_options.AskMe)
     if configure: self.local_conf.UpdateConf()
     # Choose whether to use Unicode or text symbols

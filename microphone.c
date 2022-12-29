@@ -11,7 +11,7 @@
 #include "freedv.h"
 
 #ifdef MS_WINDOWS
-#include <Winsock2.h>
+#include <winsock2.h>
 static int mic_cleanup = 0;		// must clean up winsock
 #else
 #include <sys/socket.h>
@@ -60,6 +60,7 @@ struct alc {
 int mic_max_display;				// display value of maximum microphone signal level 0 to 2**15 - 1
 int quiskSpotLevel = -1;			// level is -1 for Spot button Off; else the Spot level 0 to 1000.
 int quiskImdLevel = 500;			// level for rxMode IMD, 0 to 1000
+int hermes_mox_bit;				// mox bit to send to Hermes
 
 static SOCKET mic_socket = INVALID_SOCKET;	// send microphone samples to a socket
 static double mic_agc_level = 0.10;		// Mic levels below this are noise and are ignored
@@ -88,13 +89,9 @@ static int hermes_num_samples;			// number of samples in the buffer
 static short hermes_buf[HERMES_TX_BUF_SHORTS];		// buffer to store Tx I/Q samples waiting to be sent at 48 ksps
 static int hermes_filter_rx;		// hermes filter to use for Rx
 static int hermes_filter_tx;		// hermes filter to use for Tx
-static int alex_hpf_rx;                 // Alex HPF to use for Rx
-static int alex_hpf_tx;                 // Alex HPF to use for Tx
-static int alex_lpf_rx;                 // Alex LPF to use for Rx
-static int alex_lpf_tx;                 // Alex LPF to use for Tx
 
 static void serial_key_samples(complex double *, int);
-static int last_play_state;
+static play_state_t last_play_state;
 
 #define TX_BLOCK_SHORTS		600		// transmit UDP packet with this many shorts (two bytes) (perhaps + 1)
 #define MIC_MAX_HOLD_TIME	400		// Time to hold the maximum mic level on the Status screen in milliseconds
@@ -684,7 +681,7 @@ static int tx_filter_freedv(complex double * filtered, int count, int encode)
 			break;
 		}
 	}
-	if (last_rx_mode != rxMode) {	// change to sideband
+	if (last_rx_mode != (int)rxMode) {	// change to sideband
 		last_rx_mode = rxMode;
 		if (rxMode == FDV_U)	 // upper sideband
 			quisk_filt_tune((struct quisk_dFilter *)&filter2, 1600.0 / n_modem_sample_rate, 1);
@@ -893,7 +890,7 @@ static void quisk_hermes_tx_add(complex double * cSamples, int tx_count, int key
 void quisk_hermes_tx_send(int tx_socket, int * tx_records)
 {	// Send one UDP block of mic samples using the Metis-Hermes protocol.  Timing is from blocks received, rate is 48k.
 	// If the key is up we send samples anyway, but the samples are zero.
-	int i, j, offset, sent, ratio, mox_bit;
+	int i, j, offset, sent, ratio;
 	short s;
 	unsigned char sendbuf[1032];
 	unsigned char * pt_buf;
@@ -913,7 +910,13 @@ void quisk_hermes_tx_send(int tx_socket, int * tx_records)
 		last_play_state = quisk_play_state;
 		serial_key_samples(NULL, 0);
 	}
-	if (quisk_play_state == SOFTWARE_CWKEY) {
+	//printf("hermes_tx_send start 2: hermes_num_samples %d\n", hermes_num_samples);
+	ratio = quisk_sound_state.sample_rate / 48000;		// send rate is 48 ksps
+	//printf ("quisk_hermes_tx_send ratio %d count %d\n", ratio, *tx_records);
+	if (*tx_records / ratio < 63 * 2)		// tx_records is the number of samples received for each receiver
+		return;
+	// Send 63*2 Tx samples with control bytes
+	if (quisk_play_state == SOFTWARE_CWKEY) {	// Send CW samples
 		serial_key_samples(cw_samples, 63 * 2);
 		j = 0;
 		for (i = 0; i < 63 * 2; i++) {
@@ -923,21 +926,6 @@ void quisk_hermes_tx_send(int tx_socket, int * tx_records)
 		hermes_read_index = 0;
 		hermes_num_samples = 63 * 2;
 	}
-	if (quisk_is_key_down()) {
-		if (quisk_play_state == HARDWARE_CWKEY)
-			mox_bit = 0;
-		else
-			mox_bit = 1;
-	}
-	else {
-		mox_bit = 0;
-	}
-	//printf("hermes_tx_send start 2: hermes_num_samples %d\n", hermes_num_samples);
-	ratio = quisk_sound_state.sample_rate / 48000;		// send rate is 48 ksps
-	//printf ("quisk_hermes_tx_send ratio %d count %d\n", ratio, *tx_records);
-	if (*tx_records / ratio < 63 * 2)		// tx_records is the number of samples received for each receiver
-		return;
-	// Send 63*2 Tx samples with control bytes
 	//printf ("Buffer usage %.1f %%\n", 100.0 * hermes_num_samples / HERMES_TX_BUF_SAMPLES);
 	//printf ("Tx  quisk_hermes_tx_send ratio %d, count %d, samples %d\n", ratio, *tx_records, hermes_num_samples);
 	*tx_records -= 63 * 2 * ratio;
@@ -960,27 +948,19 @@ void quisk_hermes_tx_send(int tx_socket, int * tx_records)
 	sendbuf[9] = 0x7F;
 	sendbuf[10] = 0x7F;
 	offset = C0_index * 4;		// offset into quisk_pc_to_hermes is C0[7:1] * 4
-	sendbuf[11] = C0_index << 1 | mox_bit;			// C0
+	sendbuf[11] = C0_index << 1 | hermes_mox_bit;			// C0
 	sendbuf[12] = quisk_pc_to_hermes[offset++];		// C1
 	sendbuf[13] = quisk_pc_to_hermes[offset++];		// C2
 	sendbuf[14] = quisk_pc_to_hermes[offset++];		// C3
 	sendbuf[15] = quisk_pc_to_hermes[offset++];		// C4
 	if (C0_index == 0) {	// Do not change receiver count without stopping Hermes and restarting
 		sendbuf[15] = quisk_multirx_count << 3 | 0x04;	// Send the old count, not the changed count
-		if (mox_bit)		// send filter selection on J16
+		if (hermes_mox_bit)		// send filter selection on J16
 			sendbuf[13] = hermes_filter_tx << 1;
 		else
 			sendbuf[13] = hermes_filter_rx << 1;
 	}
         else if ( ! quisk_is_vna && C0_index == 9) {
-		if (mox_bit) {		// send Alex filter selection
-			sendbuf[14] = alex_hpf_tx;
-			sendbuf[15] = alex_lpf_tx;
-                }
-		else {
-			sendbuf[14] = alex_hpf_rx;
-			sendbuf[15] = alex_lpf_rx;
-                }
         }
 	if (++C0_index > 16)
 		C0_index = 0;
@@ -1008,7 +988,7 @@ void quisk_hermes_tx_send(int tx_socket, int * tx_records)
 
 		// Only send periodic hermeslite writes in second part of frame
 		hlwp = 5*(quisk_hermeslite_writepointer-1);
-		sendbuf[523] = quisk_hermeslite_writequeue[hlwp++] << 1 | mox_bit;
+		sendbuf[523] = quisk_hermeslite_writequeue[hlwp++] << 1 | hermes_mox_bit;
 		sendbuf[524] = quisk_hermeslite_writequeue[hlwp++];
 		sendbuf[525] = quisk_hermeslite_writequeue[hlwp++];
 		sendbuf[526] = quisk_hermeslite_writequeue[hlwp++];
@@ -1021,27 +1001,19 @@ void quisk_hermes_tx_send(int tx_socket, int * tx_records)
 		}
 	} else {
 		offset = C0_index * 4;		// offset into quisk_pc_to_hermes is C0[7:1] * 4
-		sendbuf[523] = C0_index << 1 | mox_bit;		// C0
+		sendbuf[523] = C0_index << 1 | hermes_mox_bit;		// C0
 		sendbuf[524] = quisk_pc_to_hermes[offset++];		// C1
 		sendbuf[525] = quisk_pc_to_hermes[offset++];		// C2
 		sendbuf[526] = quisk_pc_to_hermes[offset++];		// C3
 		sendbuf[527] = quisk_pc_to_hermes[offset++];		// C4
 		if (C0_index == 0) {
 			sendbuf[527] = quisk_multirx_count << 3 | 0x04;		// Send the old count, not the changed count
-			if (mox_bit)		// send filter selection on J16
+			if (hermes_mox_bit)		// send filter selection on J16
 				sendbuf[525] = hermes_filter_tx << 1;
 			else
 				sendbuf[525] = hermes_filter_rx << 1;
 		}
                 else if ( ! quisk_is_vna && C0_index == 9) {
-		        if (mox_bit) {		// send Alex filter selection
-			        sendbuf[526] = alex_hpf_tx;
-			        sendbuf[527] = alex_lpf_tx;
-                        }
-		        else {
-			        sendbuf[526] = alex_hpf_rx;
-			        sendbuf[527] = alex_lpf_rx;
-                        }
                 }
 		if (++C0_index > 16)
 			C0_index = 0;
@@ -1278,8 +1250,8 @@ int quisk_process_microphone(int mic_sample_rate, complex double * cSamples, int
 			cSamples[i] = 0;
 	}
 	if (key_down != key_was_down) {	
-		key_down_counter = 4800;	// Key was pressed. Zero the first few samples to clear the buffers.
-		init_alc(&tx_alc, 0);		// init ALC for Tx and RECORD_MIC
+		key_down_counter = quisk_start_ssb_delay * 48;	// Key was pressed. Zero the first few samples to clear the buffers.
+		init_alc(&tx_alc, 0);		// init ALC for Tx and TMP_RECORD_MIC
 		key_was_down = key_down;
 	}
 	if (quisk_play_state != last_play_state) {
@@ -1297,21 +1269,21 @@ int quisk_process_microphone(int mic_sample_rate, complex double * cSamples, int
 		else switch (rxMode) {
 		case LSB:		// LSB
 		case USB:		// USB
-			if (quisk_record_state == PLAYBACK)
+			if (quisk_record_state == TMP_PLAY_SPKR_MIC)
 				count = tx_filter_digital(cSamples, count);	// filter samples, minimal processing
 			else
 				count = tx_filter(cSamples, count);		// filter samples
 			process_alc(cSamples, count, &tx_alc, rxMode);
 			break;
 		case AM:		// AM
-			if (quisk_record_state != PLAYBACK)		// no audio processing for recorded sound
+			if (quisk_record_state != TMP_PLAY_SPKR_MIC)		// no audio processing for recorded sound
 				count = tx_filter(cSamples, count);
 			for (i = 0; i < count; i++)	// transmit (0.5 + ampl/2, 0)
 				cSamples[i] = (creal(cSamples[i]) + CLIP16) * 0.5;
 			process_alc(cSamples, count, &tx_alc, rxMode);
 			break;
 		case FM:		// FM
-			if (quisk_record_state != PLAYBACK)		// no audio processing for recorded sound
+			if (quisk_record_state != TMP_PLAY_SPKR_MIC)		// no audio processing for recorded sound
 				count = tx_filter(cSamples, count);
 			if (quisk_ctcss_freq > 9) {
 				ctcss_delta = 2.0 * M_PI / MIC_OUT_RATE * quisk_ctcss_freq;
@@ -1422,7 +1394,7 @@ int quisk_process_microphone(int mic_sample_rate, complex double * cSamples, int
 	else if (quisk_use_rx_udp && key_down) {	// Send mic samples to UDP when key is down
 		transmit_udp(cSamples, count);
 	}
-	if (quisk_record_state == RECORD_MIC) {
+	if (quisk_record_state == TMP_RECORD_MIC) {
 		switch (rxMode) {
 		case LSB:		// LSB
 		case USB:		// USB
@@ -1519,22 +1491,6 @@ PyObject * quisk_set_hermes_filter(PyObject * self, PyObject * args)
 	return Py_None;
 }
 
-PyObject * quisk_set_alex_hpf(PyObject * self, PyObject * args)
-{
-	if (!PyArg_ParseTuple (args, "ii", &alex_hpf_rx, &alex_hpf_tx))
-		return NULL;
-	Py_INCREF (Py_None);
-	return Py_None;
-}
-
-PyObject * quisk_set_alex_lpf(PyObject * self, PyObject * args)
-{
-	if (!PyArg_ParseTuple (args, "ii", &alex_lpf_rx, &alex_lpf_tx))
-		return NULL;
-	Py_INCREF (Py_None);
-	return Py_None;
-}
-
 void quisk_close_mic(void)
 {
 	if (mic_socket != INVALID_SOCKET) {
@@ -1615,11 +1571,10 @@ void quisk_set_tx_mode(void)	// called when the mode rxMode is changed
 }
 
 #define CW_RISE_MSEC	5
-#define CW_DELAY_MSEC	15
-#define CW_DELAY_SAMPLES	(CW_DELAY_MSEC * 48)
+#define CW_DELAY_SAMPLES	(START_CW_DELAY_MAX * 48)
 static void serial_key_samples(complex double * cSamples, int count)	// called from the sound thread
 {  // Internal CW from serial port key - fill cSamples with CW samples
-	int i, key_down;
+	int i, key_down, delay;
 	static double ampl = 0;
 	static char delay_line[CW_DELAY_SAMPLES];	// play CW a fixed delay after the key
 	static int delay_index;
@@ -1633,11 +1588,13 @@ static void serial_key_samples(complex double * cSamples, int count)	// called f
 		return;
 	}
 
+	delay = quisk_start_cw_delay * 48;
 	for (i = 0; i < count; i++) {
 		key_down = delay_line[delay_index];
 		delay_line[delay_index] =  QUISK_CWKEY_DOWN;
-		if (++delay_index >= CW_DELAY_SAMPLES)
+		if (++delay_index >= delay) {
 			delay_index = 0;
+		}
 		if (key_down) {		// key is down
 			if (ampl < themax) {
 				ampl += delta;

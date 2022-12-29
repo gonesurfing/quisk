@@ -4,7 +4,7 @@ from __future__ import print_function
 from __future__ import absolute_import
 from __future__ import division
 
-import sys, re
+import sys, re, json
 import wx, wx.lib.buttons, wx.lib.stattext
 # The main script will alter quisk_conf_defaults to include the user's config file.
 import quisk_conf_defaults as conf
@@ -222,9 +222,12 @@ class SliderBoxH:
   """A horizontal control with a slider and text with a value.  The text must have a %d or %f if display is True."""
   def __init__(self, parent, text, init, themin, themax, handler, display, pos, width, scale=1):
     self.text = text
+    self.themin = themin
+    self.themax = themax
     self.handler = handler
     self.display = display
     self.scale = scale
+    self.idName = text
     if display:		# Display the slider value
       t1 = self.text % (themin * scale)
       t2 = self.text % (themax * scale)
@@ -258,6 +261,8 @@ class SliderBoxH:
     if event:
       event.Skip()
       if self.handler:
+        if application.remote_control_head:
+          application.Hardware.RemoteCtlSend(f'{self.idName};{self.GetValue()}\n')
         self.handler(event)
     if self.display:
       t = self.text % (self.slider.GetValue() * self.scale)
@@ -270,12 +275,26 @@ class SliderBoxH:
     # Set slider visual position; does not call handler
     self.slider.SetValue(value)
     self.OnScroll()
+  def GetDecValue(self):	# Return the value 0.0 to 1.0
+    return float(self.slider.GetValue() - self.themin) / (self.themax - self.themin)
+  def SetDecValue(self, value, do_cmd=True):	# Set the value with a decimal 0.0 to 1.0
+    if value < 0.0:
+      value = 0.0
+    elif value > 1.0:
+      value = 1.0
+    value = value * (self.themax - self.themin) + self.themin
+    value = int(value + 0.5)
+    self.SetValue(value)
+    if do_cmd:
+      if application.remote_control_head:
+        application.Hardware.RemoteCtlSend(f'{self.idName};{self.GetValue()}\n')
+      self.handler(None)
 
 class SliderBoxHH(SliderBoxH, wx.BoxSizer):
   """A horizontal control with a slider and text with a value.  The text must have a %d if display is True."""
-  def __init__(self, parent, text, init, themin, themax, handler, display):
+  def __init__(self, parent, text, init, themin, themax, handler, display, scale=1):
     wx.BoxSizer.__init__(self, wx.HORIZONTAL)
-    SliderBoxH.__init__(self, parent, text, init, themin, themax, handler, display, None, None)
+    SliderBoxH.__init__(self, parent, text, init, themin, themax, handler, display, None, None, scale)
     #font = wx.Font(10, wx.FONTFAMILY_SWISS, wx.NORMAL, wx.FONTWEIGHT_NORMAL, False, conf.quisk_typeface)
     #self.text_ctrl.SetFont(font)
     self.Add(self.text_ctrl, 0, wx.ALIGN_CENTER)
@@ -288,7 +307,9 @@ class SliderBoxV(wx.BoxSizer):
   def __init__(self, parent, text, init, themax, handler, display=False, themin=0):
     wx.BoxSizer.__init__(self, wx.VERTICAL)
     self.slider = wx.Slider(parent, -1, init, themin, themax, style=wx.SL_VERTICAL|wx.SL_INVERSE)
-    self.slider.Bind(wx.EVT_SCROLL, handler)
+    self.slider.Bind(wx.EVT_SCROLL, self.OnScroll)
+    self.handler = handler
+    self.idName = text
     sw, sh = self.slider.GetSize()
     self.text = text
     self.themin = themin
@@ -322,6 +343,10 @@ class SliderBoxV(wx.BoxSizer):
     self.text_ctrl.SetForegroundColour(parent.GetForegroundColour())
     self.Add(self.text_ctrl, 0, 0)
     self.Add(self.slider, 1, 0)
+  def OnScroll(self, event):
+    if application.remote_control_head:
+      application.Hardware.RemoteCtlSend(f'{self.idName};{self.GetValue()}\n')
+    self.handler(event)
   def Change(self, event):
     event.Skip()
     self.text_ctrl.SetLabel(str(self.slider.GetValue()))
@@ -333,6 +358,18 @@ class SliderBoxV(wx.BoxSizer):
   def SetValue(self, value):
     # Set slider visual position; does not call handler
     self.slider.SetValue(value)
+  def GetDecValue(self):	# Return the value 0.0 to 1.0
+    return float(self.slider.GetValue() - self.themin) / (self.themax - self.themin)
+  def SetDecValue(self, value, do_cmd=True):	# Set the value with a decimal 0.0 to 1.0
+    if value < 0.0:
+      value = 0.0
+    elif value > 1.0:
+      value = 1.0
+    value = value * (self.themax - self.themin) + self.themin
+    value = int(value + 0.5)
+    self.SetValue(value)
+    if do_cmd:
+      self.OnScroll(None)
 
 class QuiskText1(wx.lib.stattext.GenStaticText):
   # Self-drawn text for QuiskText.
@@ -402,6 +439,8 @@ class QuiskText(wx.BoxSizer):
     self.Add(self.TextCtrl, 1, flag=wx.ALIGN_CENTER_VERTICAL)
   def SetLabel(self, label):
     self.TextCtrl.SetLabel(label)
+  def GetLabel(self):
+    return self.TextCtrl.GetLabel()
 
 # Start of our button classes.  They are compatible with wxPython GenButton
 # buttons.  Use the usual methods for access:
@@ -412,7 +451,8 @@ class QuiskText(wx.BoxSizer):
 
 class QuiskButtons:
   """Base class for special buttons."""
-  def __init__(self):
+  def __init__(self, idName):
+    self.idName = idName	# idName can be ''
     self.up_brush = wx.Brush(conf.color_btn)
     r, g, b = self.up_brush.GetColour().Get(False)
     r, g, b = min(255,r+32), min(255,g+32), min(255,b+32)
@@ -504,6 +544,7 @@ class QuiskButtons:
 
 class QuiskBitmapButton(wx.lib.buttons.GenBitmapButton):
   def __init__(self, parent, command, bitmap, use_right=False):
+    self.idName = "Bitmap"
     self.command = command
     self.bitmap = bitmap
     wx.lib.buttons.GenBitmapButton.__init__(self, parent, -1, bitmap)
@@ -533,7 +574,7 @@ class QuiskBitmapButton(wx.lib.buttons.GenBitmapButton):
 class QuiskPushbutton(QuiskButtons, wx.lib.buttons.GenButton):
   """A plain push button widget."""
   def __init__(self, parent, command, text, use_right=False, text_color=None, style=0):
-    QuiskButtons.__init__(self)
+    QuiskButtons.__init__(self, text)
     wx.lib.buttons.GenButton.__init__(self, parent, -1, text, style=style)
     self.command = command
     self.Bind(wx.EVT_BUTTON, self.OnButton)
@@ -544,6 +585,8 @@ class QuiskPushbutton(QuiskButtons, wx.lib.buttons.GenButton):
       self.Bind(wx.EVT_RIGHT_UP, self.OnRightUp)
   def OnButton(self, event):
     if self.command:
+      if application.remote_control_head:
+        application.Hardware.RemoteCtlSend(self.idName + ';1\n')
       self.command(event)
   def OnRightDown(self, event):
     self.direction = -1
@@ -551,12 +594,19 @@ class QuiskPushbutton(QuiskButtons, wx.lib.buttons.GenButton):
   def OnRightUp(self, event):
     self.OnLeftUp(event)
     self.direction = 1
+  def SetIndex(self, index):
+    if self.command and index:
+      if application.remote_control_head:
+        application.Hardware.RemoteCtlSend(self.idName + ';1\n')
+      event = wx.PyEvent()
+      event.SetEventObject(self)
+      self.command(event)
       
 
 class QuiskRepeatbutton(QuiskButtons, wx.lib.buttons.GenButton):
   """A push button that repeats when held down."""
   def __init__(self, parent, command, text, up_command=None, use_right=False):
-    QuiskButtons.__init__(self)
+    QuiskButtons.__init__(self, text)
     wx.lib.buttons.GenButton.__init__(self, parent, -1, text)
     self.command = command
     self.up_command = up_command
@@ -606,12 +656,25 @@ class QuiskRepeatbutton(QuiskButtons, wx.lib.buttons.GenButton):
       self.SendCommand(self.command)
   def OnButton(self, event):
     pass	# button command not used
+  def Shortcut(self, event, button_name=None):
+    if not self.IsEnabled():
+      return
+    if button_name == "_end_":
+      self.repeat_state = 0
+      self.timer.Stop()
+      self.SendCommand(self.up_command)
+    else:
+      self.shift = False
+      self.control = False
+      self.SendCommand(self.command)
+      self.repeat_state = 1		# first button push
+      self.timer.Start(milliseconds=300, oneShot=True)
 
 class QuiskCheckbutton(QuiskButtons, wx.lib.buttons.GenToggleButton):
   """A button that pops up and down, and changes color with each push."""
   # Check button; get the checked state with self.GetValue()
   def __init__(self, parent, command, text, color=None, use_right=False):
-    QuiskButtons.__init__(self)
+    QuiskButtons.__init__(self, text)
     wx.lib.buttons.GenToggleButton.__init__(self, parent, -1, text)
     self.InitButtons(text)
     self.Bind(wx.EVT_BUTTON, self.OnButton)
@@ -629,11 +692,22 @@ class QuiskCheckbutton(QuiskButtons, wx.lib.buttons.GenToggleButton):
     wx.lib.buttons.GenToggleButton.SetValue(self, value)
     self.button_down = value
     if do_cmd and self.command:
+      if application.remote_control_head:
+        application.Hardware.RemoteCtlSend(f'{self.idName};{self.GetIndex()}\n')
       event = wx.PyEvent()
       event.SetEventObject(self)
       self.command(event)
+  def SetIndex(self, index, do_cmd=False):
+    self.SetValue(bool(index), do_cmd)
+  def GetIndex(self):
+    if self.GetValue():
+      return 1
+    else:
+      return 0
   def OnButton(self, event):
     if self.command:
+      if application.remote_control_head:
+        application.Hardware.RemoteCtlSend(f'{self.idName};{self.GetIndex()}\n')
       self.command(event)
   def OnRightDown(self, event):
     self.direction = -1
@@ -641,8 +715,9 @@ class QuiskCheckbutton(QuiskButtons, wx.lib.buttons.GenToggleButton):
   def OnRightUp(self, event):
     self.OnLeftUp(event)
     self.direction = 1
-  def Shortcut(self, event):
-    self.SetValue(not self.GetValue(), True)
+  def Shortcut(self, event, button_name=None):
+    if self.IsEnabled():
+      self.SetValue(not self.GetValue(), True)
 
 class QuiskBitField(wx.Window):
   """A control used to set/unset bits."""
@@ -853,6 +928,8 @@ class WrapControl(wx.BoxSizer):
     return self.button.GetValue()
   def SetValue(self, value, do_cmd=False):
     self.button.SetValue(value, do_cmd)
+  def SetIndex(self, index, do_cmd=False):
+    self.button.SetIndex(index, do_cmd)
   def GetLabel(self):
     return self.button.GetLabel()
   def __getattr__(self, name):
@@ -893,11 +970,12 @@ class WrapMenu(WrapControl):
     self.Add(button, 1, flag=wx.ALIGN_CENTER_VERTICAL)
     b = QuiskBitmapButton(button.GetParent(), self.OnPopButton, _bitmap_menupop)
     self.Add(b, 0, flag=wx.ALIGN_CENTER_VERTICAL|wx.LEFT, border=2)
+    self.pop_button = b
   def OnPopButton(self, event):
     if self.on_open:
       self.on_open(self.menu)
     pos = (5, 5)
-    self.button.PopupMenu(self.menu, pos)
+    self.pop_button.PopupMenu(self.menu, pos)
 
 class WrapSlider(WrapControl):
   def __init__(self, button, command, slider_value=0, slider_min=0, slider_max=1000, display=False, wintype=''):
@@ -959,6 +1037,8 @@ class WrapSlider(WrapControl):
       self.button.SetLabel(str(value))
       self.button.Refresh()
     if self.command:
+      if application.remote_control_head:
+        application.Hardware.RemoteCtlSend(f'{self.idName}Slider;{value}\n')
       event = wx.PyEvent()
       event.SetEventObject(self.button)
       self.command(event)
@@ -984,7 +1064,6 @@ class WrapDualSlider(WrapControl):	# Thanks to Steve, KF7O
     self.display = display                  # Display the value at the top
     WrapControl.__init__(self)
     self.Add(button, 1, flag=wx.ALIGN_CENTER_VERTICAL)
-    print("Size",self.button.GetSize())
     ## This is a hack to get _bitmap_sliderpop
     ## It would be better if _bitmap_sliderpop were not a global variable 
     ##but a first-class member in another module
@@ -1033,6 +1112,8 @@ class QuiskCycleCheckbutton(QuiskCheckbutton):
     QuiskCheckbutton.SetLabel(self, label)
     QuiskCheckbutton.SetValue(self, self.index)
     if do_cmd and self.command:
+      if application.remote_control_head:
+        application.Hardware.RemoteCtlSend(f'{self.idName};{self.GetIndex()}\n')
       event = wx.PyEvent()
       event.SetEventObject(self)
       self.command(event)
@@ -1041,9 +1122,13 @@ class QuiskCycleCheckbutton(QuiskCheckbutton):
     QuiskCheckbutton.SetLabel(self, self.labels[index])
     QuiskCheckbutton.SetValue(self, index)
     if do_cmd and self.command:
+      if application.remote_control_head:
+        application.Hardware.RemoteCtlSend(f'{self.idName};{self.GetIndex()}\n')
       event = wx.PyEvent()
       event.SetEventObject(self)
       self.command(event)
+  def GetIndex(self):
+    return self.index
   def OnButton(self, event):
     if not self.is_radio or self.button_down:
       self.direction = 1
@@ -1054,6 +1139,8 @@ class QuiskCycleCheckbutton(QuiskCheckbutton):
     else:
       self.direction = 0
     if self.command:
+      if application.remote_control_head:
+        application.Hardware.RemoteCtlSend(f'{self.idName};{self.GetIndex()}\n')
       self.command(event)
   def OnRightDown(self, event):		# Move left in the list of labels
     if not self.is_radio or self.GetValue():
@@ -1063,6 +1150,8 @@ class QuiskCycleCheckbutton(QuiskCheckbutton):
       self.SetIndex(self.index)
       self.direction = -1
       if self.command:
+        if application.remote_control_head:
+          application.Hardware.RemoteCtlSend(f'{self.idName};{self.GetIndex()}\n')
         self.command(event)
   def OnLeftDclick(self, event):	# Left double-click: Set index zero
     if not self.is_radio or self.GetValue():
@@ -1070,15 +1159,22 @@ class QuiskCycleCheckbutton(QuiskCheckbutton):
       self.SetIndex(self.index)
       self.direction = 1
       if self.command:
+        if application.remote_control_head:
+          application.Hardware.RemoteCtlSend(f'{self.idName};{self.GetIndex()}\n')
         self.command(event)
   def DrawLabel(self, dc, width, height, dx=0, dy=0):
     QuiskCheckbutton.DrawLabel(self, dc, width, height, dx, dy)
     self.DrawGlyphCycle(dc, width, height)
-  def Shortcut(self, event):
-    index = self.index + 1
-    if index >= len(self.labels):
-      index = 0
-    self.SetIndex(index, True)
+  def Shortcut(self, event, button_name=None):
+    if self.IsEnabled():
+      if not self.is_radio or self.button_down:
+        self.direction = 1
+        index = self.index + 1
+        if index >= len(self.labels):
+          index = 0
+        self.SetIndex(index, True)
+      else:
+        self.SetIndex(self.index, True)
 
 class RadioButtonGroup:
   """This class encapsulates a group of radio buttons.  This class is not a button!
@@ -1089,7 +1185,7 @@ class RadioButtonGroup:
   """
   def __init__(self, parent, command, labels, default, shortcuts=()):
     self.command = command
-    self.buttons = []
+    self.buttons = []	# This list of buttons can also contain WrapControls
     self.button = None
     self.shortcuts = list(shortcuts[:])
     self.last_shortcut = 0
@@ -1123,11 +1219,14 @@ class RadioButtonGroup:
     else:
       button.command = self.OnButton
   def SetLabel(self, label, do_cmd=False, direction=None):
+    if application.remote_control_head:
+      func = "%s.SetLabel" % self.idName
+      application.Hardware.RemoteCtlSend(f'JsonAppFunc;{json.dumps((func, label, do_cmd, direction))}\n')
     self.button = None
     for b in self.buttons:
       if self.button is not None:
         b.SetValue(False)
-      elif isinstance(b, QuiskCycleCheckbutton):
+      elif isinstance(b, QuiskCycleCheckbutton) or (isinstance(b, WrapControl) and isinstance(b.button, QuiskCycleCheckbutton)):
         try:
           index = b.labels.index(label)
         except ValueError:
@@ -1138,7 +1237,10 @@ class RadioButtonGroup:
           self.button = b
           b.SetValue(True)
           if direction is not None:
-            b.direction = direction
+            if isinstance(b, WrapControl):
+              b.button.direction = direction
+            else:
+              b.direction = direction
       elif b.GetLabel() == label:
         b.SetValue(True)
         self.button = b
@@ -1166,11 +1268,11 @@ class RadioButtonGroup:
     return self.button.GetLabel()
   def GetSelectedButton(self):		# return the selected button
     return self.button
-  def GetIndex(self):	# Careful.  Some buttons are complex.
+  def GetIndex(self):	# Careful.  Some buttons are WrapControls.
     if not self.button:
       return None
     return self.buttons.index(self.button)
-  def Shortcut(self, event):
+  def Shortcut(self, event):	# Not used for Midi
     # Multiple buttons can have the same shortcut, so move to the next one.
     index = self.last_shortcut + 1
     length = len(self.shortcuts)
@@ -1211,7 +1313,7 @@ class _PopWindow(wx.PopupWindow):
 
 class RadioBtnPopup:
   """This class contains a button that pops up a row of radio buttons"""
-  def __init__(self, parent, command, in_labels, default):
+  def __init__(self, parent, command, in_labels, default, idName):
     self.parent = parent
     self.pop_command = command
     self.button_data = {}
@@ -1223,10 +1325,12 @@ class RadioBtnPopup:
       else:
         labels.append(item)
     self.RbDialog = _PopWindow(parent, self.OnGroupButton, labels, default)
+    self.RbDialog.RbGroup.idName = idName
     self.RbDialog.Hide()
     self.pop_control = wx.BoxSizer(wx.HORIZONTAL)
     self.first_button = QuiskPushbutton(parent, self.OnFirstButton, labels[0], text_color=conf.color_popchoice)
     self.first_button.decoration = u'\u21D2'
+    self.first_button.idName = idName
     self.second_button = QuiskBitmapButton(parent, self.OnSecondButton, _bitmap_menupop, use_right=True)
     self.pop_control.Add(self.first_button, 1, flag=wx.ALIGN_CENTER_VERTICAL)
     self.pop_control.Add(self.second_button, 0, flag=wx.ALIGN_CENTER_VERTICAL|wx.LEFT, border=2)
@@ -1324,6 +1428,8 @@ class RadioBtnPopup:
       event.SetEventObject(self.first_button)
       self.pop_command(event)
     self.first_button.direction = direc
+  def GetButtons(self):
+    return self.RbDialog.RbGroup.GetButtons()
   def Refresh(self):
     pass
   def ChangeSlider(self, slider_value):
@@ -1340,6 +1446,10 @@ class RadioBtnPopup:
     return self.parent
   def GetSize(self):
     return self.first_button.GetSize()
+  def Shortcut(self, event, button_name=None):
+    self.SetLabel(button_name, True)
+  def GetSelectedButton(self):		# return the selected button
+    return self.RbDialog.RbGroup.GetSelectedButton()
 
 class FreqSetter(wx.TextCtrl):
   def __init__(self, parent, x, y, label, fmin, fmax, freq, command):
@@ -1405,3 +1515,45 @@ class FreqSetter(wx.TextCtrl):
     except:
       value = 7000
     return value
+
+class QuiskMenu(wx.Menu):
+  def __init__(self, menu_name):
+    wx.Menu.__init__(self)
+    self.menu_name = menu_name
+    self.id2data = {}
+    self.item_text2id = {}
+  def InitData(self, item, handler):
+    self.Bind(wx.EVT_MENU, self.Handler, item)
+    item_text = item.GetItemLabelText()
+    self.id2data[item.GetId()] = (item_text, handler)
+    self.item_text2id[item_text] = item.GetId()
+  def Append(self, item_text, handler):
+    item = wx.Menu.Append(self, -1, item_text)
+    self.InitData(item, handler)
+    return item
+  def AppendCheckItem(self, item_text, handler, is_checked=0):
+    item = wx.Menu.AppendCheckItem(self, -1, item_text)
+    item.Check(is_checked)
+    self.InitData(item, handler)
+    return item
+  def AppendRadioItem(self, item_text, handler, is_checked=0):
+    item = wx.Menu.AppendRadioItem(self, -1, item_text)
+    item.Check(is_checked)
+    self.InitData(item, handler)
+    return item
+  def IsItemChecked(self, item_text):
+    nid = self.item_text2id[item_text]
+    menu_item = self.FindItemById(nid)
+    return menu_item.IsChecked()
+  def Handler(self, event=None, nid=0):
+    if event:
+      nid = event.GetId()
+    item_text, handler = self.id2data[nid]
+    if application.remote_control_head:
+      menu_item = self.FindItemById(nid)
+      if menu_item.IsCheckable():
+        checked = menu_item.IsChecked()
+      else:
+        checked = 0
+      application.Hardware.RemoteCtlSend('MENU;%s;%s;%d\n' % (self.menu_name, item_text, int(checked)))
+    handler(event)

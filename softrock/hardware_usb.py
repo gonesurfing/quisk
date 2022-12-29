@@ -10,8 +10,8 @@ from quisk_hardware_model import Hardware as BaseHardware
 import _quisk as QS
 
 # All USB access is through control transfers using pyusb.
-#   byte_array      = dev.ctrl_transfer (IN,  bmRequest, wValue, wIndex, length, timout)
-#   len(string_msg) = dev.ctrl_transfer (OUT, bmRequest, wValue, wIndex, string_msg, timout)
+#   byte_array      = dev.ctrl_transfer (IN,  bmRequest, wValue, wIndex, length, timeout)
+#   len(string_msg) = dev.ctrl_transfer (OUT, bmRequest, wValue, wIndex, string_msg, timeout)
 
 try:
   import usb
@@ -79,7 +79,7 @@ class Hardware(BaseHardware):
       try:		# This exception occurs for the Peabody SDR.  Thanks to ON7VQ for figuring out the problem,
         usb_dev.set_configuration()        # and to David, AE9RB, for the fix.
       except:
-        if DEBUG: traceback.print_exc()
+        pass #if DEBUG: traceback.print_exc()
       try:
         ret = usb_dev.ctrl_transfer(IN, 0x00, 0x0E00, 0, 2)
       except:
@@ -201,7 +201,7 @@ class Hardware(BaseHardware):
     if not self.usb_dev:
       return 0
     ret = self.usb_dev.ctrl_transfer(IN, 0x3C, 0, 0, 4)
-    s = ret.tostring()
+    s = ret.tobytes()
     freq = UBYTE4.unpack(s)[0]
     freq = int(freq * 1.0e6 / 2097152.0 / 4.0 + 0.5)
     return freq
@@ -209,7 +209,7 @@ class Hardware(BaseHardware):
     if not self.usb_dev:
       return 0
     ret = self.usb_dev.ctrl_transfer(IN, 0x3A, 0, 0, 4)
-    s = ret.tostring()
+    s = ret.tobytes()
     freq = UBYTE4.unpack(s)[0]
     freq = int(freq * 1.0e6 / 2097152.0 / 4.0 + 0.5)
     return freq

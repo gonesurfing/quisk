@@ -5,27 +5,29 @@
 // Sound parameters
 //
 #define QUISK_SC_SIZE		256
-#define QUISK_PATH_SIZE     256         // max file path length
-#define IP_SIZE				32
+#define QUISK_PATH_SIZE		256		// max file path length
+#define IP_SIZE			32
 #define MAX_FILTER_SIZE		10001
-#define BIG_VOLUME			2.2e9
-#define CLOSED_TEXT			"The sound device is closed."
-#define CLIP32				2147483647
-#define CLIP16				32767
+#define BIG_VOLUME		2.2e9
+#define CLOSED_TEXT		"The sound device is closed."
+#define CLIP32			2147483647
+#define CLIP16			32767
 #define SAMP_BUFFER_SIZE	66000		// size of arrays used to capture samples
-#define IMD_TONE_1			1200		// frequency of IMD test tones
-#define IMD_TONE_2			1600
-#define INTERP_FILTER_TAPS	85			// interpolation filter
+#define IMD_TONE_1		1200		// frequency of IMD test tones
+#define IMD_TONE_2		1600
+#define INTERP_FILTER_TAPS	85		// interpolation filter
 #define MIC_OUT_RATE		48000		// mic post-processing sample rate
-#define PA_LIST_SIZE 		16			// max number of pulseaudio devices
-#define QUISK_MAX_RECEIVERS	9			// max number of receiver channels
+#define PA_LIST_SIZE		16		// max number of pulseaudio devices
+#define QUISK_MAX_SUB_RECEIVERS		9	// Maximum number of sub-receiver channels in addition to the main receiver
+#define QUISK_INDEX_SUB_RX1		4	// Index of sub-receiver Rx1 in quiskPlaybackDevices
+#define START_CW_DELAY_MAX	250		// Maximum delay for start_cw_delay
 
 // Test the audio: 0 == No test; normal operation;
 // 1 == Copy real data to the output; 2 == copy imaginary data to the output;
 // 3 == Copy transmit audio to the output.
 #define TEST_AUDIO	0
 
-#define QUISK_CWKEY_DOWN	(quisk_hardware_cwkey || quisk_serial_key_down || quisk_midi_cwkey)
+#define QUISK_CWKEY_DOWN	(quisk_hardware_cwkey || quisk_serial_key_down || quisk_midi_cwkey || quisk_remote_cwkey)
 
 #ifdef MS_WINDOWS
 #define QUISK_SHUT_RD	SD_RECEIVE
@@ -138,7 +140,8 @@ struct sound_dev {				// data for sound capture or playback device
    // frames.
 	int read_frames;
 	int latency_frames;			// desired latency in audio play samples
-	int play_buf_size;			// size of the sound card playback buffer in frames or bytes
+	int play_buf_size;			// size of the sound card playback buffer in frames (?? or bytes)
+	int play_buf_bytes;			// size of the sound card playback buffer in bytes
         int old_key;                            // previous key up/down state
 	int use_float;				// DirectX: Use IEEE floating point
 	int dataPos;				// DirectX: data position
@@ -166,6 +169,13 @@ struct sound_dev {				// data for sound capture or playback device
 	device_index_t dev_index;	// identify devices
 	void * device_data;		// special data for each sound device
         double TimerTime0;              // Used to print debug messages
+	// Variables used to correct differences in sample rates:
+	int cr_correction;
+	int cr_delay;
+	double cr_average_fill;
+	int cr_average_count;
+	int cr_sample_time;
+	int cr_correct_time;
 } ;
 
 extern struct sound_dev quisk_Playback;
@@ -188,7 +198,7 @@ struct sound_conf {
 	int overrange;		// count of ADC overrange (clip) for non-soundcard device
 	int latencyCapt;
 	int latencyPlay;
-	int interupts;
+	int interrupts;
 	char msg1[QUISK_SC_SIZE];
 	char err_msg[QUISK_SC_SIZE];
 	// These parameters are for the microphone:
@@ -205,21 +215,21 @@ struct sound_conf {
 	char IQ_server[IP_SIZE];	//IP address of optional streaming IQ server (pulseaudio)
 	int verbose_pulse;      // verbose output for pulse audio
 	int verbose_sound;	// verbose output for other sound systems
+	int quiskKeyupDelay;	// keup delay in milliseconds
 } ;
 
 enum quisk_rec_state {
 	IDLE,
-	RECORD_RADIO,
-	RECORD_MIC,
-	PLAYBACK,
-	PLAY_FILE,
-	PLAY_SAMPLES } ;
+	TMP_RECORD_SPEAKERS,
+	TMP_RECORD_MIC,
+	TMP_PLAY_SPKR_MIC,
+	FILE_PLAY_SPKR_MIC,
+	FILE_PLAY_SAMPLES } ;
 extern enum quisk_rec_state quisk_record_state;
 
 struct wav_file {
 	FILE * fp;
 	char file_name[QUISK_PATH_SIZE];
-	int enable;
 	unsigned long samples;
 };
 
@@ -236,6 +246,20 @@ struct QuiskWav {			// data to create a WAV or RAW audio file
     int fpPos;
 } ;
 
+// Remote Quisk control head and slave by Ben, AC2YD
+extern int remote_control_head;
+extern int remote_control_slave;
+int read_remote_radio_sound_socket(complex double * cSamples);
+int read_remote_mic_sound_socket(complex double * cSamples);
+void send_remote_radio_sound_socket(complex double * cSamples, int nSamples);
+void send_remote_mic_sound_socket(complex double * cSamples, int nSamples);
+extern PyObject * quisk_start_control_head_remote_sound(PyObject * self, PyObject * args);
+extern PyObject * quisk_stop_control_head_remote_sound(PyObject * self, PyObject * args);
+extern PyObject * quisk_start_remote_radio_remote_sound(PyObject * self, PyObject * args);
+extern PyObject * quisk_stop_remote_radio_remote_sound(PyObject * self, PyObject * args);
+extern int receive_graph_data(double * fft_avg);
+extern void send_graph_data(double * fft_avg, int fft_size, double zoom, double deltaf, int fft_sample_rate, double scale);
+
 void QuiskWavClose(struct QuiskWav *);
 int QuiskWavWriteOpen(struct QuiskWav *, char *, short, short, short, int, double);
 void QuiskWavWriteC(struct QuiskWav *, complex double *, int);
@@ -246,6 +270,7 @@ void QuiskWavReadC(struct QuiskWav *, complex double *, int);
 void QuiskWavReadD(struct QuiskWav *, double *, int);
 void QuiskMeasureRate(const char *, int, int, int);
 void quisk_record_audio(struct wav_file *, complex double *, int);
+void copy2pixels(double * pixels, int n_pixels, double * fft, int fft_size, double zoom, double deltaf, double rate);
 
 extern struct sound_conf quisk_sound_state, * pt_quisk_sound_state;
 extern int mic_max_display;		// display value of maximum microphone signal level
@@ -260,7 +285,6 @@ extern double quisk_mic_preemphasis;	// Mic preemphasis 0.0 to 1.0; or -1.0
 extern double quisk_mic_clip;			// Mic clipping; try 3.0 or 4.0
 extern int quisk_noise_blanker;			// Noise blanker level, 0 for off
 extern int quisk_sidetoneCtrl;			// sidetone control value 0 to 1000
-extern int quiskKeyupDelay;			// key-up delay from the config file
 extern double quisk_audioVolume;		// volume control for radio sound playback, 0.0 to 1.0
 extern int quiskImdLevel;				// level for rxMode IMD
 extern int quiskTxHoldState;			// state machine for Tx wait for repeater frequency shift
@@ -271,6 +295,7 @@ extern unsigned int quisk_hermeslite_writepointer;		// write pointer into write 
 extern unsigned int quisk_hermeslite_writeattempts;		// counter for write retries
 extern unsigned int quisk_hermes_code_version;			// Hermes code version from Hermes to PC
 extern unsigned int quisk_hermes_board_id;			// Hermes board ID from Hermes to PC
+extern int hermes_mox_bit;					// Hermes mox bit from the PC to Hermes
 extern int quisk_use_rx_udp;					// Method of access to UDP hardware
 extern complex double cRxFilterOut(complex double, int, int);
 extern int quisk_multirx_count;			// number of additional receivers zero or 1, 2, 3, ..
@@ -279,8 +304,10 @@ extern int quisk_is_vna;			// is this the VNA program?
 extern int quisk_serial_key_errors;		// Error count for the Quisk internal serial key
 extern double quisk_sidetoneVolume;		// Audio output level of the CW sidetone, 0.0 to 1.0
 extern int quisk_serial_key_down;		// The state of the serial port CW key
+extern int quisk_serial_ptt;			// The state of the serial port PTT
 extern int quisk_hardware_cwkey;		// The state of the hardware CW key from UDP or USB
 extern int quisk_midi_cwkey;			// The state of the MIDI CW key
+extern int quisk_remote_cwkey;			// The state of the remote CW key
 extern int quisk_sidetoneFreq;			// Frequency in hertz for the sidetone
 extern int quisk_active_sidetone;		// Whether and how to generate a sidetone
 extern int quisk_isFDX;				// Are we in full duplex mode?
@@ -289,6 +316,10 @@ extern play_state_t quisk_play_state;		// startup, receiving, sidetone
 extern int freedv_current_mode;			// current FreeDV mode; 700D, @)@) etc.
 extern int n_modem_sample_rate;			// Receive data, decimate to modem_sample_rate, FreeDV codec output data at speech_sample_rate
 extern int n_speech_sample_rate;		// Microphone decimate to speech_sample_rate, Freedv codec output data at modem_sample_rate, interpolate to 48000
+extern int quisk_start_cw_delay;		// milliseconds to delay output on serial or MIDI CW key down
+extern int quisk_start_ssb_delay;		// milliseconds to discard output for all modes except CW
+extern struct sound_dev * quiskPlaybackDevices[];	// array of Playback sound devices
+extern int quisk_close_file_play;
 
 extern PyObject * quisk_set_spot_level(PyObject * , PyObject *);
 extern PyObject * quisk_get_tx_filter(PyObject * , PyObject *);
@@ -297,9 +328,12 @@ extern PyObject * quisk_set_ampl_phase(PyObject * , PyObject *);
 extern PyObject * quisk_capt_channels(PyObject * , PyObject *);
 extern PyObject * quisk_play_channels(PyObject * , PyObject *);
 extern PyObject * quisk_micplay_channels(PyObject * , PyObject *);
-extern PyObject * quisk_sound_devices(PyObject * , PyObject *);
-extern PyObject * quisk_pa_sound_devices(PyObject * , PyObject *);
+extern PyObject * quisk_alsa_sound_devices(PyObject * , PyObject *);
+extern PyObject * quisk_directx_sound_devices(PyObject * , PyObject *);
+extern PyObject * quisk_portaudio_sound_devices(PyObject * , PyObject *);
+extern PyObject * quisk_pulseaudio_sound_devices(PyObject * , PyObject *);
 extern PyObject * quisk_wasapi_sound_devices(PyObject * , PyObject *);
+extern PyObject * quisk_dummy_sound_devices(PyObject * , PyObject *);
 extern PyObject * quisk_sound_errors(PyObject *, PyObject *);
 extern PyObject * quisk_set_file_record(PyObject *, PyObject *);
 extern PyObject * quisk_set_file_name(PyObject *, PyObject *, PyObject *);
@@ -318,10 +352,16 @@ extern PyObject * quisk_freedv_get_rx_char(PyObject *, PyObject *);
 extern PyObject * quisk_freedv_set_options(PyObject *, PyObject *, PyObject *);
 extern PyObject * quisk_set_sparams(PyObject *, PyObject *, PyObject *);
 extern PyObject * quisk_freedv_set_squelch_en(PyObject *, PyObject *);
-extern PyObject * quisk_open_key(PyObject *, PyObject *);
+extern PyObject * quisk_open_key(PyObject *, PyObject *, PyObject *);
 extern PyObject * quisk_close_key(PyObject *, PyObject *);
 extern PyObject * quisk_set_sound_name(PyObject *, PyObject *);
-extern PyObject * quisk_control_midi(PyObject *, PyObject *, PyObject *);
+extern PyObject * quisk_alsa_control_midi(PyObject *, PyObject *, PyObject *);
+extern PyObject * quisk_wasapi_control_midi(PyObject *, PyObject *, PyObject *);
+
+// WDSP interface
+#define QUISK_WDSP_RX	1
+extern PyObject * quisk_wdsp_set_parameter(PyObject *, PyObject *, PyObject *);
+extern int wdspFexchange0(int, double *, int);
 
 // These function pointers are the Start/Stop/Read interface for
 // the SDR-IQ and any other C-language extension modules that return
@@ -339,7 +379,7 @@ void quisk_play_samples(complex double *, int);
 void quisk_play_zeros(int);
 void quisk_start_sound(void);
 int quisk_get_overrange(void);
-void quisk_mixer_set(char *, int, PyObject *, char *, int);
+void quisk_alsa_mixer_set(char *, int, PyObject *, char *, int);
 int quisk_read_sound(void);
 int quisk_process_microphone(int, complex double *, int);
 void quisk_open_mic(void);
@@ -357,7 +397,7 @@ void quisk_hermes_tx_send(int, int *);
 void quisk_udp_mic_error(char *);
 void quisk_check_freedv_mode(void);
 void quisk_calc_audio_graph(double, complex double *, double *, int, int);
-int QuiskDeltaMsec(int);
+double QuiskDeltaSec(int);
 void * quisk_make_sidetone(struct sound_dev *, int);
 void * quisk_make_txIQ(struct sound_dev *, int);
 int quisk_play_sidetone(struct sound_dev *);
@@ -424,9 +464,10 @@ int import_quisk_api(void);	// used to initialize Quisk_API
 #define QuiskSleepMicrosec	(*(	void	(*)	(int)			)Quisk_API[5])
 #define QuiskPrintTime		(*(	void	(*)	(const char *, int)	)Quisk_API[6])
 #define quisk_sample_source	(*(	void	(*)	(ty_sample_start, ty_sample_stop, ty_sample_read)	)Quisk_API[7])
-#define quisk_dvoice_freedv	(*(	void	(*)	(ty_dvoice_codec_rx, ty_dvoice_codec_tx)	)Quisk_API[8])
-#define quisk_is_key_down	(*(	int	(*)	(void)			)Quisk_API[9])
+#define quisk_dvoice_freedv	(*(	void	(*)	(ty_dvoice_codec_rx, ty_dvoice_codec_tx)        	)Quisk_API[8])
+#define quisk_is_key_down	(*(	int	(*)	(void)			                                )Quisk_API[9])
 #define quisk_sample_source4	(*(	void	(*)	(ty_sample_start, ty_sample_stop, ty_sample_read, ty_sample_write)	)Quisk_API[10])
+#define strMcpy                 (*(     char *  (*)     (char *, const char *, size_t)                          )Quisk_API[11])
 
 #else
 // Used to export symbols from _quisk in quisk.c
@@ -441,11 +482,12 @@ void	quisk_sample_source(ty_sample_start, ty_sample_stop, ty_sample_read);
 void	quisk_dvoice_freedv(ty_dvoice_codec_rx, ty_dvoice_codec_tx);
 int	quisk_is_key_down(void);
 void	quisk_sample_source4(ty_sample_start, ty_sample_stop, ty_sample_read, ty_sample_write);
+char *  strMcpy(char *, const char *, size_t);
 
 #define QUISK_API_INIT	{ \
  &quisk_sound_state, &QuiskGetConfigInt, &QuiskGetConfigDouble, &QuiskGetConfigString, &QuiskTimeSec, \
  &QuiskSleepMicrosec, &QuiskPrintTime, &quisk_sample_source, &quisk_dvoice_freedv, &quisk_is_key_down, \
- &quisk_sample_source4 \
+ &quisk_sample_source4, &strMcpy \
  }
 
 #endif

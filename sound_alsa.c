@@ -2,6 +2,7 @@
  * This modue provides sound access for QUISK using the ALSA
  * library for Linux.
 */
+#ifdef QUISK_HAVE_ALSA
 #include <Python.h>
 #include <complex.h>
 #include <math.h>
@@ -14,7 +15,6 @@
  (channel0, channel1), (channel0, channel1), ...
 */
 
-int quisk_midi_cwkey;		// the CW key from MIDI NoteOn/NoteOff messages
 extern struct sound_conf quisk_sound_state;	// Current sound status
 
 static int is_little_endian;			// Test byte order; is it little-endian?
@@ -294,9 +294,7 @@ void quisk_play_alsa(struct sound_dev * playdev, int nSamples,
 	int i, n, index, buffer_frames;
 	snd_pcm_sframes_t frames, rewind;
 	int ii, qq;
-	double tm, buffer_fill;
 
-	//static int N0 = 0;	// JIM
 #if DEBUG_IO
 	static int timer=0;
 #endif
@@ -315,30 +313,10 @@ void quisk_play_alsa(struct sound_dev * playdev, int nSamples,
 	if (report_latency) {		// Report for main playback device
 		quisk_sound_state.latencyPlay = buffer_frames;		// samples in play buffer
 	}
+	playdev->cr_average_fill += (double)(buffer_frames + nSamples / 2) / playdev->play_buf_size;
+	playdev->cr_average_count++;
 	if (playdev->dev_index == t_MicPlayback)
 		mic_playbuf_util = (double)(nSamples + buffer_frames) / playdev->play_buf_size;
-	if (quisk_sound_state.verbose_sound > 1) {
-		tm = QuiskTimeSec();
-		if (tm - playdev->TimerTime0 > 20.000) {
-			int fill = buffer_frames + nSamples / 2;
-			buffer_fill = (double)fill / playdev->play_buf_size;
-#if 0
-			double drate = (fill - N0) / (tm - playdev->TimerTime0);
-			int M0;
-			if (abs(drate) > 1E-10)
-				M0 = playdev->sample_rate / drate;
-			else
-				M0 = 0;
-			QuiskPrintf("%s:  Buffer fill %5.2f%%, delta sps %8.4lf, M0 %10d, fill %7.4lf\n", playdev->stream_description,
-				buffer_fill * 100, drate, M0, buffer_fill - 0.5);
-			playdev->TimerTime0 = tm;
-			N0 = fill;
-#else
-			QuiskPrintf("%s:  Buffer fill %5.2f%%\n", playdev->stream_description, buffer_fill * 100);
-			playdev->TimerTime0 = tm;
-#endif
-		}
-	}
 #if DEBUG_IO
 	timer += nSamples;
 	if (timer > playdev->sample_rate) {
@@ -347,40 +325,8 @@ void quisk_play_alsa(struct sound_dev * playdev, int nSamples,
 			playdev->stream_description, nSamples, buffer_frames, nSamples + buffer_frames, playdev->latency_frames);
 	}
 #endif
-	if (volume == 0.0) {
-		n = playdev->latency_frames - buffer_frames;	// samples needed to get back to the target value
-#if DEBUG_IO
-		if (abs(n - nSamples) > 100)
-			printf("play_alsa %s: Zero volume correction nSamples %5d to %5d\n", playdev->stream_description, nSamples, n);
-#endif
-		if (n <= 0)
-			nSamples = 0;
-		else if (n <= nSamples)
-			nSamples = n;
-		else {
-			n -= nSamples;	// number of samples to add
-			if (n > 100)	// arbitrary increase - should be tested
-				n = 100;
-			for (i = 0; i < n; i++)
-				cSamples[nSamples++] = 0.0;
-		}
-	}
-	else if (nSamples + buffer_frames > playdev->play_buf_size * 7 / 10) {
-		nSamples--;
-#if DEBUG_IO
-		printf("play_alsa %s: Remove a sample nSamples %d  buffer_frames %d  total %d\n",
-			playdev->stream_description, nSamples, (int)buffer_frames, nSamples + (int)buffer_frames);
-#endif
-	}
-	else if(nSamples + buffer_frames < playdev->play_buf_size * 3 / 10 && nSamples >= 2) {
-		cSamples[nSamples] = cSamples[nSamples - 1];
-		cSamples[nSamples - 1] = (cSamples[nSamples - 2] + cSamples[nSamples]) / 2.0;
-		nSamples++;
-#if DEBUG_IO
-		printf ("play_alsa %s: Add a sample nSamples %d  buffer_frames %d  total %d\n",
-			playdev->stream_description, nSamples, (int)buffer_frames, nSamples + (int)buffer_frames);
-#endif
-	}
+
+	
 	if (nSamples + buffer_frames > playdev->play_buf_size) {	// rewind some frames to go back to the fill level latency_frames
 		rewind = nSamples + buffer_frames - playdev->latency_frames;
 		if (rewind > buffer_frames)
@@ -528,7 +474,7 @@ static int device_list(PyObject * py, snd_pcm_stream_t stream, char * name)
 	return 0;
 }
 
-PyObject * quisk_sound_devices(PyObject * self, PyObject * args)
+PyObject * quisk_alsa_sound_devices(PyObject * self, PyObject * args)
 {	// Return a list of ALSA device names [pycapt, pyplay]
 	PyObject * pylist, * pycapt, * pyplay;
 
@@ -550,7 +496,7 @@ static snd_pcm_format_t check_formats(struct sound_dev * dev, snd_pcm_hw_params_
 	snd_pcm_format_t format = SND_PCM_FORMAT_UNKNOWN;
 	dev->sample_bytes = 0;
 
-	strncpy (dev->msg1, "Available formats: ", QUISK_SC_SIZE);
+	strMcpy (dev->msg1, "Available formats: ", QUISK_SC_SIZE);
 	if (snd_pcm_hw_params_test_format (dev->handle, hware, SND_PCM_FORMAT_S32) == 0) {
 		if (!dev->sample_bytes) {
 			strncat(dev->msg1, "*", QUISK_SC_SIZE);
@@ -618,11 +564,11 @@ static int quisk_open_alsa_capture(struct sound_dev * dev)
 	else
 		mode = 0;
 	if ( ! strncmp (dev->name, "alsa:", 5)) {	// search for the name in info strings, put device name into buf
-		strncpy(buf, dev->name + 5, QUISK_SC_SIZE);
+		strMcpy(buf, dev->name + 5, QUISK_SC_SIZE);
 		device_list(NULL, SND_PCM_STREAM_CAPTURE, buf);
 	}
 	else {		// just try to open the device
-		strncpy(buf, dev->device_name, QUISK_SC_SIZE);
+		strMcpy(buf, dev->device_name, QUISK_SC_SIZE);
 	}
 	for (i = 0; i < 6; i++) {	// try a few times in case the device is busy
 		if (quisk_sound_state.verbose_sound)
@@ -635,7 +581,7 @@ static int quisk_open_alsa_capture(struct sound_dev * dev)
 	if (err < 0) {
 		snprintf(quisk_sound_state.err_msg, QUISK_SC_SIZE, "Cannot open capture device %.40s (%.40s)",
 				dev->name, snd_strerror (err));
-		strncpy(dev->dev_errmsg, quisk_sound_state.err_msg, QUISK_SC_SIZE);
+		strMcpy(dev->dev_errmsg, quisk_sound_state.err_msg, QUISK_SC_SIZE);
 		if (quisk_sound_state.verbose_sound)
 			printf("%s\n", quisk_sound_state.err_msg);
 		return 1;
@@ -687,11 +633,11 @@ static int quisk_open_alsa_capture(struct sound_dev * dev)
 	}
 	// Set the capture parameters
 	if (check_formats(dev, hware) == SND_PCM_FORMAT_UNKNOWN) {
-		strncpy(quisk_sound_state.msg1, dev->msg1, QUISK_SC_SIZE);
-		strncpy (quisk_sound_state.err_msg, "Quisk does not support your capture format.", QUISK_SC_SIZE);
+		strMcpy(quisk_sound_state.msg1, dev->msg1, QUISK_SC_SIZE);
+		strMcpy (quisk_sound_state.err_msg, "Quisk does not support your capture format.", QUISK_SC_SIZE);
 		goto errend;
 	}
-	strncpy(quisk_sound_state.msg1, dev->msg1, QUISK_SC_SIZE);
+	strMcpy(quisk_sound_state.msg1, dev->msg1, QUISK_SC_SIZE);
 	sample_rate = dev->sample_rate;
 	if (snd_pcm_hw_params_set_rate (handle, hware, sample_rate, 0) < 0) {
 		snprintf (quisk_sound_state.err_msg, QUISK_SC_SIZE, "Can not set sample rate %d",
@@ -699,12 +645,12 @@ static int quisk_open_alsa_capture(struct sound_dev * dev)
 		goto errend;
 	}
 	if (snd_pcm_hw_params_set_access (handle, hware, SND_PCM_ACCESS_RW_INTERLEAVED) < 0) {
-		strncpy(quisk_sound_state.err_msg, "Interleaved access is not available", QUISK_SC_SIZE);
+		strMcpy(quisk_sound_state.err_msg, "Interleaved access is not available", QUISK_SC_SIZE);
 		goto errend;
 	}
 	if (snd_pcm_hw_params_get_channels_min(hware, &ui) != 0)
 		ui = 0;	// Error
-	if (dev->num_channels < ui)		// increase number of channels to minimum available
+	if (dev->num_channels < (int)ui)		// increase number of channels to minimum available
 		dev->num_channels = ui;
 	if (snd_pcm_hw_params_set_channels (handle, hware, dev->num_channels) < 0) {
 		snprintf (quisk_sound_state.err_msg, QUISK_SC_SIZE, "Can not set channels to %d", dev->num_channels);
@@ -718,7 +664,7 @@ static int quisk_open_alsa_capture(struct sound_dev * dev)
 	}
 	dev->play_buf_size = frames;	// play_buf_size used for capture buffer size too
 	poll_size = (int)(quisk_sound_state.data_poll_usec * 1e-6 * sample_rate + 0.5);
-	if (frames < poll_size * 3) {		// buffer size is too small, reduce poll time
+	if ((int)frames < poll_size * 3) {		// buffer size is too small, reduce poll time
 		quisk_sound_state.data_poll_usec = (int)(frames * 1.e6 / sample_rate / 3 + 0.5);
 #if DEBUG_IO
 		printf("Reduced data_poll_usec %d for small sound capture buffer\n",
@@ -728,7 +674,7 @@ static int quisk_open_alsa_capture(struct sound_dev * dev)
 	if (quisk_sound_state.verbose_sound) {
 		printf("    %s\n", dev->msg1);
 		printf("    Capture buffer size %d\n", dev->play_buf_size);
-		if (frames > SAMP_BUFFER_SIZE / dev->num_channels)
+		if ((int)frames > SAMP_BUFFER_SIZE / dev->num_channels)
 			printf("Capture buffer exceeds size of sample buffers\n");
 	}
 	if ((err = snd_pcm_hw_params (handle, hware)) < 0) {
@@ -782,11 +728,11 @@ static int quisk_open_alsa_playback(struct sound_dev * dev)
 	else
 		mode = 0;
 	if ( ! strncmp (dev->name, "alsa:", 5)) {	// search for the name in info strings, put device name into buf
-		strncpy(buf, dev->name + 5, QUISK_SC_SIZE);
+		strMcpy(buf, dev->name + 5, QUISK_SC_SIZE);
 		device_list(NULL, SND_PCM_STREAM_PLAYBACK, buf);
 	}
 	else {		// just try to open the device
-		strncpy(buf, dev->device_name, QUISK_SC_SIZE);
+		strMcpy(buf, dev->device_name, QUISK_SC_SIZE);
 	}
 	for (i = 0; i < 6; i++) {	// try a few times in case the device is busy
 		if (quisk_sound_state.verbose_sound)
@@ -799,7 +745,7 @@ static int quisk_open_alsa_playback(struct sound_dev * dev)
 	if (err < 0) {
 		snprintf (quisk_sound_state.err_msg, QUISK_SC_SIZE, "Cannot open playback device %.40s (%.40s)\n",
 				dev->name, snd_strerror (err));
-		strncpy(dev->dev_errmsg, quisk_sound_state.err_msg, QUISK_SC_SIZE);
+		strMcpy(dev->dev_errmsg, quisk_sound_state.err_msg, QUISK_SC_SIZE);
 		if (quisk_sound_state.verbose_sound)
 			printf("%s\n", quisk_sound_state.err_msg);
 		return 1;
@@ -853,7 +799,7 @@ static int quisk_open_alsa_playback(struct sound_dev * dev)
 	}
 	if (snd_pcm_hw_params_get_channels_min(hware, &ui) != 0)
 		ui = 0;	// Error
-	if (dev->num_channels < ui)		// increase number of channels to minimum available
+	if (dev->num_channels < (int)ui)		// increase number of channels to minimum available
 		dev->num_channels = ui;
 	if (snd_pcm_hw_params_set_channels (handle, hware, dev->num_channels) < 0) {
 		snprintf (quisk_sound_state.err_msg, QUISK_SC_SIZE, "Cannot set playback channels to %d",
@@ -861,7 +807,7 @@ static int quisk_open_alsa_playback(struct sound_dev * dev)
 		goto errend;
 	}
 	if (check_formats(dev, hware) == SND_PCM_FORMAT_UNKNOWN) {
-		strncpy(quisk_sound_state.msg1, dev->msg1, QUISK_SC_SIZE);
+		strMcpy(quisk_sound_state.msg1, dev->msg1, QUISK_SC_SIZE);
 		snprintf (quisk_sound_state.err_msg, QUISK_SC_SIZE, "Cannot set playback format.");
 		goto errend;
 	}
@@ -988,7 +934,7 @@ void quisk_close_sound_alsa(struct sound_dev ** pCapture, struct sound_dev ** pP
 	}
 }
 
-void quisk_mixer_set(char * card_name, int numid, PyObject * value, char * err_msg, int err_size)
+void quisk_alsa_mixer_set(char * card_name, int numid, PyObject * value, char * err_msg, int err_size)
 // Set card card_name mixer control numid to value for integer, boolean, enum controls.
 // If value is a float, interpret value as a decimal fraction of min/max.
 {
@@ -1015,7 +961,7 @@ void quisk_mixer_set(char * card_name, int numid, PyObject * value, char * err_m
 	//snd_ctl_elem_id_set_subdevice(id, subdevice);
 	if ( ! strncmp (card_name, "alsa:", 5)) {	// search for the name in info strings
 		char buf[QUISK_SC_SIZE];
-		strncpy(buf, card_name + 5, QUISK_SC_SIZE);
+		strMcpy(buf, card_name + 5, QUISK_SC_SIZE);
 		if ( ! device_list(NULL, SND_PCM_STREAM_CAPTURE, buf))	// check capture and play names
 			device_list(NULL, SND_PCM_STREAM_PLAYBACK, buf);
 		buf[4] = 0;		// Remove device nuumber
@@ -1151,12 +1097,12 @@ static void midi_in_devices(PyObject * pylist, int just_names)
 					if (name[0] == 0) {
 						name = snd_rawmidi_info_get_name(info);
 						if (subs == 1)
-							strncpy(friendly_name, name, FRIENDLY_NAME_SIZE);
+							strMcpy(friendly_name, name, FRIENDLY_NAME_SIZE);
 						else
 							snprintf(friendly_name, FRIENDLY_NAME_SIZE, "%s (%d)", name, sub);
 					}
 					else {
-						strncpy(friendly_name, name, FRIENDLY_NAME_SIZE);
+						strMcpy(friendly_name, name, FRIENDLY_NAME_SIZE);
 					}
 					if (just_names) {
 						PyList_Append(pylist, PyUnicode_DecodeUTF8(friendly_name, strlen(friendly_name), "replace"));
@@ -1174,7 +1120,9 @@ static void midi_in_devices(PyObject * pylist, int just_names)
 	}
 }
 
-PyObject * quisk_control_midi(PyObject * self, PyObject * args, PyObject * keywds)
+#define MIDI_MAX	6000
+
+PyObject * quisk_alsa_control_midi(PyObject * self, PyObject * args, PyObject * keywds)
 {  /* Call with keyword arguments ONLY */
 	static char * kwlist[] = {"client", "device", "close_port", "get_event", "midi_cwkey_note",
 					"get_in_names", "get_in_devices", NULL} ;
@@ -1185,6 +1133,8 @@ PyObject * quisk_control_midi(PyObject * self, PyObject * args, PyObject * keywd
 	PyObject * pylist;
 	unsigned char ch;
 	static int state = 0;
+	char midi_chars[MIDI_MAX];
+	int midi_length;
 
 	client = close_port = get_event = get_in_names = get_in_devices = -1;
 	device = NULL;
@@ -1210,7 +1160,7 @@ PyObject * quisk_control_midi(PyObject * self, PyObject * args, PyObject * keywd
 	if (device) {		// open port
 		state = 0;
 		quisk_midi_cwkey = 0;
-		if (snd_rawmidi_open(&handle_in, NULL, device, 0) != 0) {
+		if (snd_rawmidi_open(&handle_in, NULL, device, SND_RAWMIDI_NONBLOCK) != 0) {
 			handle_in = NULL;
 			printf("Failed to open MIDI device %s\n", device);
 		}
@@ -1222,13 +1172,17 @@ PyObject * quisk_control_midi(PyObject * self, PyObject * args, PyObject * keywd
 
 	}
 	if (get_event == 1 && handle_in) {
+		midi_length = 0;
 		while (snd_rawmidi_read(handle_in, &ch, 1) == 1) {
+			if (midi_length < MIDI_MAX - 1)
+				midi_chars[midi_length++] = ch;
 			switch (state) {
 			case 0:		// Wait for a status byte
+				// Ignore the channel
 				if (ch & 0x80) {		// This is a status byte
-					if (ch == 0x80)		// Note Off
+					if ((ch & 0xF0) == 0x80)		// Note Off
 						state = 1;
-					else if (ch == 0x90)	// Note On
+					else if ((ch & 0xF0) == 0x90)	// Note On
 						state = 2;
 				}
 				break;
@@ -1252,8 +1206,67 @@ PyObject * quisk_control_midi(PyObject * self, PyObject * args, PyObject * keywd
 				break;
 			}
 		}
+		if (midi_length > 0)
+			return PyByteArray_FromStringAndSize(midi_chars, midi_length);
 	}
 	Py_INCREF (Py_None);
 	return Py_None;
 }
+#else		// No Alsa available
+#include <Python.h>
+#include <complex.h>
+#include "quisk.h"
 
+PyObject * quisk_alsa_sound_devices(PyObject * self, PyObject * args)
+{
+	return quisk_dummy_sound_devices(self, args);
+}
+
+void quisk_start_sound_alsa (struct sound_dev ** pCapture, struct sound_dev ** pPlayback)
+{
+	struct sound_dev * pDev;
+	const char * msg = "No driver support for this device";
+
+	while (*pCapture) {
+		pDev = *pCapture++;
+		if (pDev->driver == DEV_DRIVER_ALSA) {
+			strMcpy(pDev->dev_errmsg, msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				QuiskPrintf("%s\n", msg);
+		}
+	}
+	while (*pPlayback) {
+		pDev = *pPlayback++;
+		if (pDev->driver == DEV_DRIVER_ALSA) {
+			strMcpy(pDev->dev_errmsg, msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				QuiskPrintf("%s\n", msg);
+		}
+	}
+}
+
+int quisk_read_alsa(struct sound_dev * dev, complex double * cSamples)
+{
+	return 0;
+}
+
+void quisk_play_alsa(struct sound_dev * playdev, int nSamples, complex double * cSamples, int report_latency, double volume)
+{}
+
+void quisk_close_sound_alsa(struct sound_dev ** pCapture, struct sound_dev ** pPlayback)
+{}
+
+void quisk_alsa_sidetone(struct sound_dev * dev)
+{}
+
+void quisk_alsa_mixer_set(char * card_name, int numid, PyObject * value, char * err_msg, int err_size)
+{
+	err_msg[0] = 0;
+}
+
+PyObject * quisk_alsa_control_midi(PyObject * self, PyObject * args, PyObject * keywds)
+{
+	Py_INCREF (Py_None);
+	return Py_None;
+}
+#endif

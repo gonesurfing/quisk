@@ -9,3 +9,4 @@ extern int freedv_current_mode;         // the current FreeDV running mode
 #define FREEDV_MODE_700C        6
 #define FREEDV_MODE_700D        7
 #define FREEDV_MODE_2020        8
+#define FREEDV_MODE_700E        13

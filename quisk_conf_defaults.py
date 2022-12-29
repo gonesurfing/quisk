@@ -2,6 +2,9 @@ from __future__ import absolute_import
 from __future__ import division
 #  ** This is the file quisk_conf_defaults.py which contains defaults for Quisk. **
 #  
+# NOTE: You probably do not want to use a configuration file. Configuration files are obsolete
+#       because almost all configuration is done from the configuration screens in Quisk.
+#
 # Please do not change this configuration file quisk_conf_defaults.py.
 # Instead copy one of the other quisk_conf_*.py files to your own
 # configuration file and make changes there.
@@ -42,7 +45,6 @@ import quisk_hardware_model as quisk_hardware
 # Module for additional widgets (advanced usage).  See n2adr/quisk_widgets.py for an example.
 # import n2adr.quisk_widgets as quisk_widgets
 quisk_widgets = None
-
 
 
 
@@ -333,33 +335,19 @@ hermes_code_version = -1
 # hermes devices, you can use this to specify a unique device.  Or use -1 to accept any board.
 hermes_board_id = -1
 
-## hermes_LNA_dB			Initial LNA dB, integer
-# The initial value for the low noise Rx amplifier gain in dB.
-hermes_LNA_dB = 20
-
 ## hermes_lowpwr_tr_enable		Disable T/R in low power, boolean
 # This option only applies to the Hermes Lite 2.
-# Normally, the T/R relay and external PTT output switch on and off when keying the transmitter.
-# But if you set this option, and if you are in low power mode (final amp off) then the T/R relay
-# remains in receive mode.  This is useful for VNA operation as you can use the low power Tx output
-# as the generator and the normal connector as the detector.
+# This has no effect if the power amp is on. If the power amp is off and this setting is True,
+# then the T/R relay does not switch but remains in the Rx state. You then have an RF output at RF1
+# and also a separate receive input at the main antenna connector RF2.
 # Changes are immediate (no need to restart).
 hermes_lowpwr_tr_enable = False
 #hermes_lowpwr_tr_enable = True
 
-## hermes_bias_adjust			Enable bias adjust, boolean
-# This option only applies to the Hermes Lite 2.
-# Below are controls that adjust the bias on the power output transistors.  Before you enable adjustment,
-# make sure you know the correct drain current and how to monitor the current.
-# Then set this to True.  When you are finished, set it back to False.  The bias adjustment
-# is stored in the hardware only when the "Write" button is pressed.
-# Changes are immediate (no need to restart).
-hermes_bias_adjust = False
-#hermes_bias_adjust = True
-
 ## hermes_power_amp			Enable power amp, boolean
 # This option only applies to the Hermes Lite 2.
-# When True, the power amp is turned on.  Otherwise, the low power output is used.
+# When True, the power amp is turned on and RF is sent to the main antenna connector RF2.
+# Otherwise, low power RF is sent to RF1.
 # Changes are immediate (no need to restart).
 hermes_power_amp = False
 #hermes_power_amp = True
@@ -382,7 +370,8 @@ hermes_disable_sync = False
 
 ## Hware_Hl2_EepromIP			Eeprom IP Address, text
 # This is the IP address stored in the Hermes Lite EEPROM. It is only used at power on. If you set an address here
-# be sure to write it down. And you may want to set "Hermes known IP" too. Make sure the address does not conflict
+# be sure to write it down. To use this address you must set "Eeprom IP Usage".
+# And you may want to set "Hermes known IP" too. Make sure the address does not conflict
 # with your DHCP server.
 Hware_Hl2_EepromIP = '192.168.1.6'
 #Hware_Hl2_EepromIP = '192.168.1.241'
@@ -396,21 +385,26 @@ Hware_Hl2_EepromIPUse = 'Ignore'
 #Hware_Hl2_EepromIPUse = 'Set address'
 
 ## Hware_Hl2_EepromMAC			Eeprom MAC Address, text
-# This is two numbers to be used as the last two bytes of the MAC address. It is only used at power on.
-# If you have multiple Hermes Lites, each one must have a different MAC address.
+# When you start Quisk, this shows the last two bytes of the MAC address that is stored in the EEPROM.
+# If you change this item, Quisk writes the last two bytes into EEPROM. The HL2 can use this MAC address
+# at power on instead of the factory supplied MAC address 0:1c:c0:a2:13:dd. It is only used at power on,
+# and it is only used if it is marked valid by setting "Eeprom MAC usage" to "Set address".
+# If you have two HL2's, you must have a unique MAC address for each.
 Hware_Hl2_EepromMAC = '0xA1 0x6B'
 #Hware_Hl2_EepromMAC = '0x4C 0x33'
 
 ## Hware_Hl2_EepromMACUse		Eeprom MAC Usage, text choice
-# This is the way the EEPROM MAC address is used at power on.
-# "Ignore" means it is not used at all. "Set address" means the address is used.
+# When you start Quisk, this shows the "Valid MAC bytes" bit in the HL2. If it is "Set address" (bit is 1)
+# the HL2 will use the last two MAC bytes from "Eeprom MAC address"; otherwise the default MAC is used.
+# If you change this item, the bit is written to the HL2.
+# The HL2 only uses these bits at power on.
 Hware_Hl2_EepromMACUse = 'Ignore'
 #Hware_Hl2_EepromMACUse = 'Set address'
 
 ## hermes_TxLNA_dB			LNA during Tx dB, integer
 # During transmit the low noise Rx amplifier gain changes to this value (in dB) if the hardware supports it.
 # Changes are immediate (no need to restart).
-hermes_TxLNA_dB = 21
+hermes_TxLNA_dB = -12
 
 ## hermes_tx_buffer_latency		Tx buffer msec, integer
 # This is the latency of the transmit buffer in milliseconds.
@@ -421,6 +415,61 @@ hermes_tx_buffer_latency = 10
 # This is the hang time for hardware push-to-talk in milliseconds.
 hermes_PTT_hang_time = 4
 #hermes_PTT_hang_time = 15
+
+## hermes_antenna_tuner			Antenna tuner, text choice
+# This option only applies to the Hermes Lite 2. Set this to None if you don't have a tuner.
+# Set this to "Tune" to control the Icom AH-4 compatible ATU attached to the Hermes Lite 2 end plate.
+# Then when the Spot button is pressed with a positive power, a tune request is sent to the ATU.
+# If the Spot button is pressed with a zero power level, the tuner is set to bypass mode.
+# Changes are immediate (no need to restart).
+hermes_antenna_tuner = 'None'
+#hermes_antenna_tuner = 'Tune'
+
+## hermes_PWM				Use PWM volts, text choice
+# Hermes-Lite2 hardware has a PWM variable voltage source. This voltage can
+# be used to control external devices. If you have not connected this voltage, this setting does not matter.
+# Choose "Fan speed" to use this voltage to control the fan speed.
+# Choose "Band indicator" to use this voltage to indicate the band in use.
+# Changes are immediate (no need to restart).
+hermes_PWM = "Fan speed"
+#hermes_PWM = "Band indicator"
+
+## hermes_disable_watchdog		Disable watchdog, boolean
+# Hermes-Lite2 hardware has a watchdog timer that requires the host computer to send regular
+# commands to keep the HL2 running. This ensures that the HL2 doesn't continue sending data
+# if the host computer program crashes. This disables the watchdog.
+# This is normally False.
+# Changes are immediate (no need to restart).
+hermes_disable_watchdog = False
+#hermes_disable_watchdog = True
+
+## hermes_reset_on_disconnect		Reset on disconnect, boolean
+# This will cause the Hermes-Lite2 to reset on each disconnect from the host.
+# This is normally False.
+# Changes are immediate (no need to restart).
+hermes_reset_on_disconnect = False
+#hermes_reset_on_disconnect = True
+
+## hermes_bias_adjust			Enable bias adjust, boolean
+# This option only applies to the Hermes Lite 2.
+# Below are controls that adjust the bias on the power output transistors.  Before you enable adjustment,
+# make sure you know the correct drain current and how to monitor the current.
+# Then set this to True.  When you are finished, set it back to False.  The bias adjustment
+# is stored in the hardware only when the "Write" button is pressed.
+# Changes are immediate (no need to restart).
+hermes_bias_adjust = False
+#hermes_bias_adjust = True
+
+## hermes_iob_rxin			IO board Rx input, text choice
+# This controls the usage of the Rx input J9 and the Pure Signal input J10 on the N2ADR IO board. This option
+# has no effect if the IO board is not installed.
+# The first option disables the Rx input at J9 and the HL2 operates as usual. The Pure Signal input at J10 is available.
+# The second option connects the HL2 receive input to J9. J10 is not available.
+# The third option connects the HL2 receive input to J9 on Rx and to J10 on Tx.
+# Changes are immediate (no need to restart).
+hermes_iob_rxin = 'J10 available'
+#hermes_iob_rxin = 'HL2 Rx to J9'
+#hermes_iob_rxin = 'Use J9 and J10'
 
 
 # These are known power meter calibration tables. This table is not present in the JSON settings file.
@@ -447,23 +496,6 @@ Hermes_BandDictTx = {'160':0, '80':0, '60':0, '40':0, '30':0, '20':0, '17':0, '1
 # Enable the separate Rx and Tx settings for the J16 connector.
 Hermes_BandDictEnTx = False
 #Hermes_BandDictEnTx = True
-
-## AlexHPF                      Alex High Pass Filters, list
-# This is a list of frequencies and high pass filter settings.
-AlexHPF = [
-    ['3.0', '4.5', 0, 0], ['6.5', '8.5', 0, 0]] + [['', '', 0, 0]] * 6
-## AlexLPF                      Alex Low Pass Filters, list
-# This is a list of frequencies and low pass filter settings.
-AlexLPF = [
-    ['3.0', '4.5', 0, 0], ['6.5', '8.5', 0, 0]] + [['', '', 0, 0]] * 6
-
-## AlexHPF_TxEn                    Alex HPF Tx Enable, boolean
-AlexHPF_TxEn = False
-#AlexHPF_TxEn = True
-
-## AlexLPF_TxEn                    Alex LPF Tx Enable, boolean
-AlexLPF_TxEn = False
-#AlexLPF_TxEn = True
 
 
 ################ Receivers Red Pitaya, The Red Pitaya Project by Pavel Demin.  This uses the Hermes FPGA code.
@@ -529,10 +561,6 @@ hermes_code_version = -1
 # hermes devices, you can use this to specify a unique device.  Or use -1 to accept any board.
 hermes_board_id = -1
 
-## hermes_LNA_dB			Initial LNA dB, integer
-# The initial value for the low noise Rx amplifier gain in dB.
-hermes_LNA_dB = 20
-
 ## Hermes_BandDict		Hermes Bus, dict
 # The Hermes_BandDict sets the 7 bits on the J16 connector.
 Hermes_BandDict = {
@@ -546,24 +574,6 @@ Hermes_BandDictTx = {'160':0, '80':0, '60':0, '40':0, '30':0, '20':0, '17':0, '1
 # Enable the separate Rx and Tx settings for the J16 connector.
 Hermes_BandDictEnTx = False
 #Hermes_BandDictEnTx = True
-
-## AlexHPF                      Alex High Pass Filters, list
-# This is a list of frequencies and high pass filter settings.
-AlexHPF = [
-    ['3.0', '4.5', 0, 0], ['6.5', '8.5', 0, 0]] + [['', '', 0, 0]] * 6
-
-## AlexLPF                      Alex Low Pass Filters, list
-# This is a list of frequencies and low pass filter settings.
-AlexLPF = [
-    ['3.0', '4.5', 0, 0], ['6.5', '8.5', 0, 0]] + [['', '', 0, 0]] * 6
-
-## AlexHPF_TxEn                    Alex HPF Tx Enable, boolean
-AlexHPF_TxEn = False
-#AlexHPF_TxEn = True
-
-## AlexLPF_TxEn                    Alex LPF Tx Enable, boolean
-AlexLPF_TxEn = False
-#AlexLPF_TxEn = True
 
 
 ################ Receivers SoapySDR, The SoapySDR interface to multiple hardware SDRs.
@@ -793,10 +803,6 @@ hermes_code_version = -1
 # Hermes devices, you can use this to specify a unique device.  Or use -1 to accept any board.
 hermes_board_id = -1
 
-## hermes_LNA_dB			Initial LNA dB, integer
-# The initial value for the low noise Rx amplifier gain in dB.
-hermes_LNA_dB = 20
-
 ## Hermes_BandDict		Hermes Bus, dict
 # The Hermes_BandDict sets the 7 bits on the J16 connector.
 Hermes_BandDict = {
@@ -810,24 +816,6 @@ Hermes_BandDictTx = {'160':0, '80':0, '60':0, '40':0, '30':0, '20':0, '17':0, '1
 # Enable the separate Rx and Tx settings for the J16 connector.
 Hermes_BandDictEnTx = False
 #Hermes_BandDictEnTx = True
-
-## AlexHPF                      Alex High Pass Filters, list
-# This is a list of frequencies and high pass filter settings.
-AlexHPF = [
-    ['3.0', '4.5', 0, 0], ['6.5', '8.5', 0, 0]] + [['', '', 0, 0]] * 6
-
-## AlexLPF                      Alex Low Pass Filters, list
-# This is a list of frequencies and low pass filter settings.
-AlexLPF = [
-    ['3.0', '4.5', 0, 0], ['6.5', '8.5', 0, 0]] + [['', '', 0, 0]] * 6
-
-## AlexHPF_TxEn                    Alex HPF Tx Enable, boolean
-AlexHPF_TxEn = False
-#AlexHPF_TxEn = True
-
-## AlexLPF_TxEn                    Alex LPF Tx Enable, boolean
-AlexLPF_TxEn = False
-#AlexLPF_TxEn = True
 
 
 ################ Receivers Afedri,   The Afedri SDR receiver with the Ethernet interface.
@@ -860,6 +848,20 @@ AlexLPF_TxEn = False
 ## default_rf_gain			Default RF gain, integer
 # This is the RF gain when starting.
 #default_rf_gain = 11
+
+
+################ Receivers Control Head, Use Quisk to control a remote radio. No real hardware is used here.
+## hardware_file_name		Hardware file path, rfile
+# Quisk can be used as a control head to control a real radio located remotely.
+# This file contains the control logic for remote radios of type Hermes, SoftRock or HiQSDR.
+hardware_file_name = 'ac2yd/control_softrock.py'
+#hardware_file_name = 'ac2yd/control_hermes.py'
+#hardware_file_name = 'ac2yd/control_hiqsdr.py'
+
+## widgets_file_name		Widget file path, rfile
+# This file adds additional controls for the radio. Choose the correct file (if any) for the remote radio.
+widgets_file_name = ''
+#widgets_file_name = 'hermes/quisk_widgets.py'
 
 
 ################ Sound
@@ -1211,9 +1213,10 @@ freq_base = 0
 #freq_base = 12500
 
 ## invertSpectrum       Invert the RF spectrum, integer choice
-# If your mixing scheme inverts the RF spectrum, set this option to un-invert it.
-invertSpectrum = 0      # Do not invert
-#invertSpectrum = 1     # Invert spectrum
+# If your mixing scheme inverts the RF spectrum, set this option to 1 to un-invert it.
+# Otherwise set it to 0.
+invertSpectrum = 0
+#invertSpectrum = 1
 
 # This is a list of mixer settings.  It only works for Linux; it has no effect in Windows.
 # Use "amixer -c 1 contents" to get a list of mixer controls and their numid's for
@@ -1229,9 +1232,11 @@ invertSpectrum = 0      # Do not invert
 # For FM transmit, this is the modulation index.
 modulation_index = 1.67
 
-## pulse_audio_verbose_output		Debug sound, integer
-# Use 1 to turn on debug and status messages for all sound systems including PulseAudio.
-# This allows for debugging of both devices and performance.
+## pulse_audio_verbose_output		Debug level, integer
+# This controls how much debug information to print to the file quisk_logfile.txt
+# and to the debug screen.
+# Use 0 to turn off all debug information except for serious errors. The debug screen will not appear.
+# Use 1 or 2 for more debug information.
 # Changes are immediate (no need to restart).
 pulse_audio_verbose_output = 0
 #pulse_audio_verbose_output = 1
@@ -1303,7 +1308,7 @@ dxClPassword = ''
 dxClExpireTime = 20
 
 ## IQ_Server_IP         Pulse server IP address, text
-#IP Adddress for remote PulseAudio IQ server.
+#IP Address for remote PulseAudio IQ server.
 IQ_Server_IP = ""
 
 ## hamlib_ip            IP address for Hamlib Rig 2, text
@@ -1359,36 +1364,52 @@ win_hamlib_com2_name = ""
 #win_hamlib_com2_name = "COM15"
 #win_hamlib_com2_name = "COM16"
 
+## remote_radio_ip         Remote radio IP or name, text
+# Quisk can be used as a control head to control a real radio located remotely.
+# This is the IP adddress or the host name of the remote radio.
+remote_radio_ip = ""
+#remote_radio_ip = "192.168.1.56"
+
+## remote_radio_password         Password for remote radio, text
+# Quisk can be used as a control head to control a real radio located remotely.
+# For security it requires the same password to be entered on both computers.
+# Enter a fairly long pass phrase of 20 or more characters.
+# It is only necessary to enter it once on each computer.
+remote_radio_password = ""
+
+
 
 hamlib_com1_name = ""
 hamlib_com2_name = ""
 
 
 ################ Keys
-## hot_key_ptt1		PTT Key 1, keycode
+## hot_key_ptt1		PTT shortcut key 1, keycode
 # Set a keyboard shortcut that will press the PTT button.
 # For a regular key, use the ord() of the key.  For example, ord('a') or ord('b').  For the space bar
-# use ord(' ').  Then restart Quisk.
+# use ord(' ').
 # If you do not want a hot key, set this to None.
 # Do not choose a key that interferes with other features
 # on your system such as system menus.
+# Changes are immediate (no need to restart). But exit the config screen to test.
 hot_key_ptt1 = None
 #hot_key_ptt1 = ord(' ')
 #hot_key_ptt1 = ord('z')
 #hot_key_ptt1 = ord('a')
 #hot_key_ptt1 = wx.WXK_F5
 
-## hot_key_ptt2		PTT Key 2, keycode
+## hot_key_ptt2		PTT shortcut key 2, keycode
 # If the Control or Shift key must be pressed too, set that key modifier here.
-# Otherwise, set NORMAL here.
-# For example, if you want control-A, set CTRL in "PTT Key 2", and ord('a') in "PTT Key 1".
+# Otherwise, set wx.ACCEL_NORMAL here.
+# For example, if you want control-A, set wx.ACCEL_CTRL in "PTT Key 2", and ord('a') in "PTT Key 1".
+# Changes are immediate (no need to restart). But exit the config screen to test.
 hot_key_ptt2 = wx.ACCEL_NORMAL
 #hot_key_ptt2 = wx.ACCEL_CTRL
 #hot_key_ptt2 = wx.ACCEL_SHIFT
 #hot_key_ptt2 = wx.ACCEL_CTRL | wx.ACCEL_SHIFT
 #hot_key_ptt2 = wx.ACCEL_ALT
 
-## hot_key_ptt_toggle	PTT Key Toggle, boolean
+## hot_key_ptt_toggle	PTT key toggle, boolean
 # Set to True if you want PTT to remain on when you release the key.  A second key press will
 # then release PTT.  This is toggle mode.  If False, you must keep pressing the key, and releasing
 # it will release PTT.
@@ -1396,11 +1417,33 @@ hot_key_ptt2 = wx.ACCEL_NORMAL
 hot_key_ptt_toggle = False
 #hot_key_ptt_toggle = True
 
-## hot_key_ptt_if_hidden	PTT Key if Hidden, boolean
+## hot_key_ptt_if_hidden	PTT key if hidden, boolean
 # Set to True if you want PTT to be active when the Quisk window is not visible.
 # Otherwise, the Quisk window must be active and on top.
 hot_key_ptt_if_hidden = False
 #hot_key_ptt_if_hidden = True
+
+## midi_cwkey_device                          Midi device name, text
+# The name of the MIDI device that will be used for CW keying, PTT or other control. Leave this blank if you
+# are not using MIDI.
+midi_cwkey_device = ''
+
+## midi_cwkey_note				Midi note for CW key, integer
+# If you have a CW key attached to a MIDI device, enter the note number for the CW key.
+# MIDI devices can send KeyUp and KeyDown messages that can be used for CW keying.
+# MIDI note numbers are integers. Middle C is number 60. The A above (440 Hz) is 69.
+# For microcontrollers, refer to its documentation for the correct note number.
+midi_cwkey_note = -1
+#midi_cwkey_note = 60
+#midi_cwkey_note = 69
+
+## midi_ptt_toggle	Midi PTT toggle, boolean
+# Set to True if you want PTT to remain on when you release the Midi PTT button.  A second button press will
+# then release PTT.  This is toggle mode.  If False, you must keep pressing the button, and releasing
+# it will release PTT.
+# Changes are immediate (no need to restart).
+midi_ptt_toggle = False
+#midi_ptt_toggle = True
 
 
 
@@ -1574,6 +1617,29 @@ fft_size_multiplier = 0
 # and should be about 5 to 10 Hertz.  Higher rates require more processor power.
 graph_refresh = 7
 
+## start_cw_delay			Start CW delay msec, integer
+# Quisk generates its own CW waveform when keyed by the serial port or MIDI.  Quisk delays this CW waveform
+# so that when changing from Rx to Tx there is time for relays to switch and power amps to turn on.
+# The CW key timing is preserved.  This is the delay in milliseconds from the first
+# CW key press until RF output. The delay can be zero to 250 milliseconds.
+# If the key is attached to the hardware and the hardware generates the CW, Quisk can not implement this delay.
+# Changes are immediate (no need to restart).
+start_cw_delay = 15
+
+## start_ssb_delay			Start SSB delay msec, integer
+# This discards the first few milliseconds of RF output when starting a transmission
+# so that relays can switch and power amps can turn on.
+# It operates in all modes except CW.
+# It should be long enough to allow filters to fill with samples.
+# Changes are immediate (no need to restart).
+start_ssb_delay = 100
+
+## maximum_tx_secs			Maximum Tx seconds, integer
+# This changes Quisk from transmit to receive after the specified number of seconds.
+# It is meant to be a failsafe timer in case Quisk is controlled remotely by another program and the link fails.
+# Enter zero to turn off the failsafe timer. If Quisk receives another Tx command, the timer restarts.
+# Changes are immediate (no need to restart).
+maximum_tx_secs = 0
 
 ## keyupDelay			Keyup delay msecs, integer
 # This is the key hang time for semi-breakin CW. It is the time in milliseconds
@@ -1591,7 +1657,7 @@ cwTone = 600
 
 ## use_sidetone				Use sidetone, integer choice
 # This controls whether Quisk will display a sidetone volume control
-# and gererate a CW sidetone.
+# and generate a CW sidetone.
 use_sidetone = 0
 #use_sidetone = 1
 
@@ -1604,11 +1670,15 @@ use_fast_sound = False
 
 ## lin_quisk_serial_port			Quisk serial port, text
 # This is the serial port used for a CW key and a PTT connection.
+# Changes are immediate (no need to restart).
+lin_quisk_serial_port = ""
 #lin_quisk_serial_port = "/dev/ttyUSB0"
 #lin_quisk_serial_port = "/dev/ttyUSB1"
 
 ## win_quisk_serial_port			Quisk serial port, text
 # This is the serial port used for a CW key and a PTT connection.
+# Changes are immediate (no need to restart).
+win_quisk_serial_port = ""
 #win_quisk_serial_port = "COM6"
 #win_quisk_serial_port = "COM7"
 
@@ -1618,6 +1688,7 @@ quisk_serial_port = ""
 # You can use the CTS signal of the serial port for a CW key or for push-to-talk PTT.
 # If "when low", the CW key or PTT is asserted (transmitting) if the voltage on the pin is low,
 # and similarly for "when high".
+# Changes are immediate (no need to restart).
 quisk_serial_cts = "None"
 #quisk_serial_cts = "CW when high"
 #quisk_serial_cts = "CW when low"
@@ -1628,25 +1699,12 @@ quisk_serial_cts = "None"
 # You can use the DSR signal of the serial port for a CW key or for push-to-talk PTT.
 # If "when low", the CW key or PTT is asserted (transmitting) if the voltage on the pin is low,
 # and similarly for "when high".
+# Changes are immediate (no need to restart).
 quisk_serial_dsr = "None"
 #quisk_serial_dsr = "CW when high"
 #quisk_serial_dsr = "CW when low"
 #quisk_serial_dsr = "PTT when high"
 #quisk_serial_dsr = "PTT when low"
-
-## midi_cwkey_device                          Midi CW key device, text
-# The name of the MIDI device that will be used for CW keying. Leave this blank if you
-# are not using MIDI keying.
-midi_cwkey_device = ''
-
-## midi_cwkey_note				Midi note for CW key, integer
-# If you have a CW key attached to a MIDI device, enter the note number for the CW key.
-# MIDI devices can send KeyUp and KeyDown messages that can be used for CW keying.
-# MIDI note numbers are integers. Middle C is number 60. The A above (440 Hz) is 69.
-# For microcontrollers, refer to its documentation for the correct note number.
-midi_cwkey_note = -1
-#midi_cwkey_note = 60
-#midi_cwkey_note = 69
 
 
 
@@ -1696,7 +1754,7 @@ freedv_tx_msg = ''
 # This is the list of FreeDV modes and their index number.  The starting mode is the first listed.
 freedv_modes = (('Mode 1600', 0), 
 		('Mode 2400A', 3), ('Mode 2400B', 4), ('Mode 800XA', 5),
-		('Mode 700C', 6), ('Mode 700D', 7), ('Mode 2020', 8), ('Future9', 9), ('Future 10', 10))
+		('Mode 700C', 6), ('Mode 700D', 7), ('Mode 2020', 8), ('Mode 700E', 13))
 
 # These are the filter bandwidths for each mode.  Quisk has built-in optimized filters
 # for these values, but you can change them if you want.
@@ -2007,17 +2065,18 @@ ePhone	= '#8888FF'		# Extra class phone
 # ARRL band plan special frequencies
 Data	= '#FF9900'
 DxData	= '#CC6600'
-RTTY	= '#FF9900'
+RTTY	= '#DA5529'
 SSTV	= '#FFFF00'
 AM		= '#00FF00'
 Packet	= '#00FFFF'
-Beacons	= '#66FF66'
+Beacons	= '#6FAECA'
 Satellite	= '#22AA88'
 Repeater	= '#AA00FF'	# Repeater outputs
 RepInput	= '#AA88FF'	# Repeater inputs
-Simplex	= '#00FF44'
-Special	= 'hot pink'
+Simplex	= '#00BEFF'
+Special	= '#FF69B4'
 Other	= '#888888'
+RxOnly	= '#AAAAAA'
 # Colors start at the indicated frequency and continue until the
 # next frequency.  The special color "None" turns off color.
 #
@@ -2039,11 +2098,11 @@ BandPlan = [
   #[ 400000, AM], [ 450000, Packet], [ 500000, Beacons], [ 550000, Satellite], [ 600000, Repeater], [ 650000, RepInput], [ 700000, Simplex],
   #[ 750000, Other], [ 800000, Special], [ 850000, None],
   # 137k
-  [  130000, Data],
-  [  150000, None],
+  [  135700, Data],
+  [  137800, None],
   # 500k
-  [  490000, Data],
-  [  510000, None],
+  [  472000, Data],
+  [  479000, None],
   # 160 meters
   [ 1800000, Data],
   [ 1809000, Other],
@@ -2216,11 +2275,15 @@ BandPlan = [
   [10500000000, None],
   ]
 
+# List of all bands in order of frequency:
+BandList = [ '137k', '500k', '160', '80', '60', '40', '30', '20', '17', '15', '12', '10', '6', '4', '2',
+             '1.25', '70cm' , '33cm', '23cm', '13cm', '9cm', '5cm', '3cm']
+
 ## BandEdge 	Band Edge, dict
 # For each band, this dictionary gives the lower and upper band edges.  Frequencies
 # outside these limits will not be remembered as the last frequency in the band.
 BandEdge = {
-	'137k':( 136000,   138000),	'500k':( 400000,   600000),
+	'137k':( 135700,   137800),	'500k':( 472000,   479000),
 	'160':( 1800000,  2000000),	'80' :( 3500000,  4000000),
 	'60' :( 5300000,  5430000),	'40' :( 7000000,  7300000),
 	'30' :(10100000, 10150000),	'20' :(14000000, 14350000),	
@@ -2245,7 +2308,7 @@ bandTime = [
 	( 2500000-10000, 10000, 'AM'),
 	( 3330000-10000, 10000, 'AM'),
 	( 5000000-10000, 10000, 'AM'),
-	( 7335000-10000, 10000, 'AM'),
+	( 7850000-10000, 10000, 'AM'),
 	(10000000-10000, 10000, 'AM'),
 	(14670000-10000, 10000, 'AM'),
 	(15000000-10000, 10000, 'AM'),
@@ -2272,10 +2335,8 @@ bandShortcuts = {'Audio':'', 'Aux1':'1', '160':'1', '80':'8', '60':'6', '40':'4'
 # the frequency displayed by Quisk.  For example, if you have a 2 meter transverter,
 # you may need to tune your hardware from 28 to 30 MHz to receive 144 to 146 MHz.
 # Enter the transverter offset in Hertz in this dictionary.  For this to work, your
-# hardware must support it.  Currently, the HiQSDR, SDR-IQ and SoftRock are supported.
-bandTransverterOffset = {
-#    '2': 144000000 - 28000000
-}
+# hardware must support it.  Currently, the HiQSDR, SDR-IQ and SoftRock are supported.  bandTransverterOffset = {'2': 144000000 - 28000000}
+bandTransverterOffset = {}
 
 
 

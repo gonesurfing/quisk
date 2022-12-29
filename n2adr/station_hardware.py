@@ -30,7 +30,6 @@ class ControlBox:	# Control my station control box
       time.sleep(0.1)
       self.socket.send(self.want_data)
   def OnButtonPTT(self, event):
-    return	# JIM
     btn = event.GetEventObject()
     if btn.GetValue():		# Turn the software key bit on or off
       self.want_data = b'C\001'
@@ -298,13 +297,14 @@ class FilterBoxV2:	# Control my 2016 high/low pass filter box
       print ('Unknown RfGain')
       self.preamp = 0
       self.application.Hardware.rf_gain = 0
-    #print ('Gain', self.preamp, self.application.Hardware.rf_gain)
+    if DEBUG: print ('Gain', self.preamp, self.application.Hardware.rf_gain)
     self.SetTxFreq(None)
   def SetPreamp(self, preamp):
     if preamp:
       self.preamp = 1
     else:
       self.preamp = 0
+    if DEBUG: print ("Preamp", preamp)
     self.SetTxFreq(None)
   def SetTxFreq(self, tx_freq):
     if tx_freq is None:
@@ -322,7 +322,7 @@ class FilterBoxV2:	# Control my 2016 high/low pass filter box
       hpf = self.hpfnum[tx_freq // 1000000]
     except IndexError:
       hpf = 0
-    #print ("V2 filter LPF %d HPF %d" % (lpf, hpf))
+    if DEBUG: print ("V2 filter LPF %d HPF %d" % (lpf, hpf))
     lpf = 1 << lpf
     hpf = 1 << hpf
     if self.preamp:
@@ -474,8 +474,10 @@ class AntennaTuner:     # Control my homebrew antenna tuner and my KI8BV dipole
     if tx_freq is None:
       return
     if tx_freq < 17000000:
+      if DEBUG and self.antnum == 1: print ("antnum 0")
       self.antnum = 0
     else:
+      if DEBUG and self.antnum == 0: print ("antnum 1")
       self.antnum = 1
     if self.antnum == 1:
       self.dipole2.SetTxFreq(tx_freq)
@@ -520,7 +522,7 @@ class AntennaTuner:     # Control my homebrew antenna tuner and my KI8BV dipole
     except socket.timeout:
       pass
 
-class StationControlGUI(wx.Frame):    # Display a control window for my antenna tuner
+class StationControlGUI(wx.Frame):    # Display a stand-alone control window for my antenna tuner
   def __init__(self, frame, hware, app, conf):
     wx.Frame.__init__(self, parent=frame, title="Station Control",
        style=wx.CAPTION|wx.CLOSE_BOX)
@@ -546,6 +548,7 @@ class StationControlGUI(wx.Frame):    # Display a control window for my antenna 
       self.TunerLCZ.append((freq, antL, antC, hilo))
     self.TunerLCZ.sort()
     self.SetBackgroundColour('light steel blue')
+    self.Bind(wx.EVT_CHAR_HOOK, self.OnKeyDown)
     sizer = wx.GridBagSizer(hgap=5, vgap=3)
     font = wx.Font(12, wx.FONTFAMILY_SWISS, wx.NORMAL, wx.FONTWEIGHT_NORMAL, False, conf.quisk_typeface)
     row = 0
@@ -603,15 +606,19 @@ class StationControlGUI(wx.Frame):    # Display a control window for my antenna 
       b.Enable(False)
     self.Bind(wx.EVT_BUTTON, self.OnBtnV2Preamp, b)
     szr.Add(b)
-    self.LCZtext = wx.StaticText(self, -1, "    L 00   C 00   High   ", style=wx.ALIGN_CENTER_VERTICAL|wx.ALIGN_LEFT)
-    self.LCZtext.SetFont(font)
-    szr.Add(self.LCZtext)
+    b = wx.StaticText(self, -1, "     Freq MHz ")
+    b.SetFont(font)
+    szr.Add(b, flag=wx.ALIGN_CENTER_VERTICAL)
+    szr.AddSpacer(10)
+    self.freq_entry = wx.TextCtrl(self, value='0000.000', style=wx.TE_PROCESS_ENTER)
+    self.freq_entry.SetFont(font)
+    self.Bind(wx.EVT_TEXT_ENTER, self.OnFreqEntry, self.freq_entry)
+    szr.Add(self.freq_entry)
     sizer.Add(szr, pos=(row, 0), span=(1, 3))
-    #sizer.Add(self.LCZtext, pos=(row, 4), span=(1, 3))
     self.SetSizer(sizer)
     self.Fit()
     w, h = self.GetSize().Get()
-    self.SetSize((w, h + 20))
+    self.SetSize((w + 20, h + 50))
     self.Bind(wx.EVT_CLOSE, self.OnBtnClose)
     if frame is None:	# Start a HeartBeat if the frame does not provide one
       self.timer = wx.Timer(self)
@@ -620,7 +627,9 @@ class StationControlGUI(wx.Frame):    # Display a control window for my antenna 
   def SetTxFreq(self, tx_freq):
     self.tx_freq = tx_freq
     index, tup = self.FindIndexTup(tx_freq)
-    self.LCZtext.SetLabel("    Freq %8d,  L %2d,  C %2d,  HiLo %d" % tup)
+    self.sliderL.SetValue(tup[1])
+    self.sliderC.SetValue(tup[2])
+    self.btnHiLo.SetValue(tup[3])
     anttuner = self.hware.anttuner
     fff, anttuner.set_L, anttuner.set_C, anttuner.set_HighZ = tup
     if tx_freq < 17000000:
@@ -642,11 +651,14 @@ class StationControlGUI(wx.Frame):    # Display a control window for my antenna 
       if i2 - i1 <= 1:
         break
     # The correct setting is between i1 and i2.
-    if tx_freq == self.TunerLCZ[i2][0]:
+    # Choose the index that is closest in frequency.
+    delta1 = tx_freq - self.TunerLCZ[i1][0]
+    delta2 = self.TunerLCZ[i2][0] - tx_freq
+    if delta2 < delta1:
       index = i2
     else:
       index = i1
-    #print ("FindIndexTup", tx_freq, i1, i2, self.TunerLCZ[index])
+    #print ("FindIndexTup", self.TunerLCZ[i1][0], tx_freq, self.TunerLCZ[i2][0])
     return index, self.TunerLCZ[index]
   def OnBtnClose(self, event):
     self.hware.anttuner.close()
@@ -662,6 +674,22 @@ class StationControlGUI(wx.Frame):    # Display a control window for my antenna 
     self.hware.anttuner.open()
     if self.hware.v2filter:
       self.hware.v2filter.SetTxFreq(1900000)	# Start 160 meters
+  def OnKeyDown(self, event):
+    key = event.GetRawKeyCode()
+    if key == 76:	# L
+      self.sliderL.SetValue(self.sliderL.GetValue() + 1)
+      self.OnSliderL()
+    elif key == 108:	# l
+      self.sliderL.SetValue(self.sliderL.GetValue() - 1)
+      self.OnSliderL()
+    elif key == 67:	# C
+      self.sliderC.SetValue(self.sliderC.GetValue() + 1)
+      self.OnSliderC()
+    elif key == 99:	# c
+      self.sliderC.SetValue(self.sliderC.GetValue() - 1)
+      self.OnSliderC()
+    else:
+      event.Skip()
   def OnBtnBand(self, event):
     btn = event.GetEventObject()
     for band in self.bands:
@@ -669,12 +697,15 @@ class StationControlGUI(wx.Frame):    # Display a control window for my antenna 
         band.SetToggle(True)
       else:
         band.SetToggle(False)
-    #band = btn.GetLabel()
-    #f1, f2 = self.conf.BandEdge[band]
-    #f = (f1 + f2) / 2
-    #if self.hware.v2filter:
-    #  self.hware.v2filter.SetTxFreq(f)
-    #self.hware.anttuner.SetTxFreq(f, no_tune=True)
+    band = btn.GetLabel()
+    f1, f2 = self.conf.BandEdge[band]
+    f = (f1 + f2) // 2
+    f = ((f + 500) // 1000) * 1000
+    if self.hware.v2filter:
+      self.hware.v2filter.SetTxFreq(f)
+    self.hware.anttuner.SetTxFreq(f, no_tune=True)
+    self.freq_entry.ChangeValue("%.3f" % (f * 1E-6))
+    self.SetTxFreq(f)
   def OnButtonHiLo(self, event):
     anttuner = self.hware.anttuner
     if self.btnHiLo.GetValue():
@@ -682,7 +713,16 @@ class StationControlGUI(wx.Frame):    # Display a control window for my antenna 
     else:
       anttuner.set_HighZ = 0
     anttuner.WantData()
+  def OnFreqEntry(self, event=None):
+    freq = self.freq_entry.GetValue()
+    freq = float(freq) * 1E6
+    freq = int(freq + 0.1)
+    self.SetTxFreq(freq)
   def OnButtonSave(self, event):
+    freq = self.freq_entry.GetValue()
+    freq = float(freq) * 1E6
+    freq = int(freq + 0.1)
+    self.tx_freq = freq
     L = self.sliderL.GetValue()
     C = self.sliderC.GetValue()
     if self.btnHiLo.GetValue():
@@ -691,27 +731,20 @@ class StationControlGUI(wx.Frame):    # Display a control window for my antenna 
       hilo = 0
     tup = (self.tx_freq, L, C, hilo)
     index, t = self.FindIndexTup(self.tx_freq)
-    freq = self.TunerLCZ[index][0]
-    if self.tx_freq < freq:
-      self.TunerLCZ.insert(0, tup)
-    elif self.tx_freq == freq:
+    if self.tx_freq == self.TunerLCZ[index][0]:
       self.TunerLCZ[index] = tup
-    elif index + 1 < len(self.TunerLCZ) and self.tx_freq == self.TunerLCZ[index + 1][0]:
-      self.TunerLCZ[index + 1] = tup
     else:
-      self.TunerLCZ.insert(index + 1, tup)
-    self.SetTxFreq(self.tx_freq)
-    #for tup in self.TunerLCZ:
-    #  print("New %12d %2d %2d %d" % tup)
+      self.TunerLCZ.append(tup)
+    self.TunerLCZ.sort()
     fp = open(self.filename, 'w')
     for tup in self.TunerLCZ[1:-1]:	# Throw away dummy entries
       fp.write("%12d %2d %2d %d\n" % tup)
     fp.close()
-  def OnSliderL(self, event):
-    self.hware.anttuner.set_L = event.GetEventObject().GetValue()
+  def OnSliderL(self, event=None):
+    self.hware.anttuner.set_L = self.sliderL.GetValue()
     self.hware.anttuner.WantData()
-  def OnSliderC(self, event):
-    self.hware.anttuner.set_C = event.GetEventObject().GetValue()
+  def OnSliderC(self, event=None):
+    self.hware.anttuner.set_C = self.sliderC.GetValue()
     self.hware.anttuner.WantData()
   def OnBtnV2Preamp(self, event):
     if self.hware.v2filter:

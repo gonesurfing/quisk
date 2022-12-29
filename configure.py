@@ -7,7 +7,7 @@ import sys, wx, wx.lib, os, re, pickle, traceback, json
 # Quisk will alter quisk_conf_defaults to include the user's config file.
 import quisk_conf_defaults as conf
 import _quisk as QS
-from quisk_widgets import QuiskPushbutton, QuiskBitField
+from quisk_widgets import QuiskPushbutton, QuiskCheckbutton, QuiskBitField, SliderBoxH, SliderBoxHH
 from quisk_widgets import wxVersion
 if wxVersion in ('2', '3'):
   import wx.combo as wxcombo
@@ -19,11 +19,12 @@ except:
   soapy = None
 
 # Settings is [
-#   0: radio_requested, a string radio name or "Ask me" or "ConfigFileRadio"
-#   1: radio in use and last used, a string radio name or "ConfigFileRadio"
-#   2: list of radio names
-#   3: parallel list of radio dicts.  These are all the parameters for the corresponding radio.  In
+#   0: Radio_requested, a string radio name or "Ask me" or "ConfigFileRadio"
+#   1: Radio in use and last used, a string radio name or "ConfigFileRadio"
+#   2: List of radio names
+#   3: Parallel list of radio dicts.  These are all the parameters for the corresponding radio.  In
 #      general, they are a subset of all the parameters listed in self.sections and self.receiver_data[radio_name].
+#   4: Global data common to all radios. This is similar to the radio dicts. Available as local_conf.globals.
 #   ]
 
 # radio_dict is a dictionary of variable names and text values for each radio including radio ConfigFileRadio.
@@ -31,7 +32,23 @@ except:
 # may be missing recently added config file items. Use GetValue() to get a configuration datum.
 
 # local_conf is the single instance of class Configuration. conf is the configuration data from quisk_conf_defaults as
-# over-writen by FSON data. 
+# over-writen by JSON data in radio_dict. Items in the radio_dict are generally strings. We convert these strings to Python
+# integers, floats, etc. and write them to conf.
+
+# The format for data items is read from quisk_conf_defaults.py, but there are data items not in this file. The
+# dictionary name2format has formats and defaults for these additional items.
+# The value is a tuple (format name, default value).
+name2format = {
+  "digital_rx1_name":('text', ''), "digital_rx2_name":('text', ''), "digital_rx3_name":('text', ''),
+  "digital_rx4_name":('text', ''), "digital_rx5_name":('text', ''), "digital_rx6_name":('text', ''),
+  "digital_rx7_name":('text', ''), "digital_rx8_name":('text', ''), "digital_rx9_name":('text', ''),
+  "win_digital_rx1_name":('text', ''), "win_digital_rx2_name":('text', ''), "win_digital_rx3_name":('text', ''),
+  "win_digital_rx4_name":('text', ''), "win_digital_rx5_name":('text', ''), "win_digital_rx6_name":('text', ''),
+  "win_digital_rx7_name":('text', ''), "win_digital_rx8_name":('text', ''), "win_digital_rx9_name":('text', ''),
+  "lin_digital_rx1_name":('text', ''), "lin_digital_rx2_name":('text', ''), "lin_digital_rx3_name":('text', ''),
+  "lin_digital_rx4_name":('text', ''), "lin_digital_rx5_name":('text', ''), "lin_digital_rx6_name":('text', ''),
+  "lin_digital_rx7_name":('text', ''), "lin_digital_rx8_name":('text', ''), "lin_digital_rx9_name":('text', ''),
+}
 
 # Increasing the software version will display a message to re-read the soapy device.
 soapy_software_version = 3
@@ -40,6 +57,15 @@ def FormatKhz(dnum):	# Round to 3 decimal places; remove ending ".000"
   t = "%.3f" % dnum
   if t[-4:] == '.000':
     t = t[0:-4]
+  return t
+
+def FormatMHz(dnum):	# Pretty print in MHz
+  t = "%.6f" % dnum
+  for i in range(3):
+    if t[-1] == '0':
+      t = t[0:-1]
+    else:
+      break
   return t
 
 def SortKey(x):
@@ -52,7 +78,8 @@ def SortKey(x):
 class Configuration:
   def __init__(self, app, AskMe=False, Radio=''):	# Called first
     global application, local_conf, Settings, noname_enable, platform_ignore, platform_accept
-    Settings = ["ConfigFileRadio", "ConfigFileRadio", [], []]
+    Settings = ["ConfigFileRadio", "ConfigFileRadio", [], [], {}]
+    self.globals = Settings[4]		# Will be replaced by quisk_settings.json
     application = app
     local_conf = self
     noname_enable = []
@@ -89,6 +116,7 @@ class Configuration:
       choices = Settings[2] + ["ConfigFileRadio"]
       dlg = wx.SingleChoiceDialog(None, "", "Start Quisk with this Radio",
           choices, style=wx.DEFAULT_FRAME_STYLE|wx.OK|wx.CANCEL)
+      dlg.SetSizeHints(dlg.GetCharWidth() * 36, -1, -1, -1)
       try:
         n = choices.index(Settings[1])		# Set default to last used radio
       except:
@@ -111,11 +139,14 @@ class Configuration:
     self.ParseConfig()
     self.originalBandEdge = {}		# save original BandEdge
     self.originalBandEdge.update(conf.BandEdge)
+    self.UpdateGlobals()
   def RequiredValues(self, radio_dict):
     radio_type = radio_dict['hardware_file_type']
     # Fill in required values
     if radio_type == "SdrIQ":
       radio_dict["use_sdriq"] = '1'
+      if radio_dict['hardware_file_name'] == "sdriqpkg/quisk_hardware.py":
+        radio_dict['hardware_file_name'] = "quisk_hardware_sdriq.py"
     else:
       radio_dict["use_sdriq"] = '0'
     if radio_type == "Hermes":
@@ -137,7 +168,47 @@ class Configuration:
         radio_dict["Hermes_BandDict"] = {}
       if "Hermes_BandDictTx" not in radio_dict:
         radio_dict["Hermes_BandDictTx"] = {}
+  def UpdateGlobals(self):
+    self.RadioName = Settings[1]
+    if self.RadioName == "ConfigFileRadio":
+      application.BandPlan = conf.BandPlan
+    elif "BandPlanColors" in Settings[4] and "BandPlan" in Settings[4]:
+      mode_dict = {"End":None}
+      for mode, color in Settings[4]["BandPlanColors"]:
+        mode_dict[mode] = color
+      plan = []
+      for freq, mode in Settings[4]["BandPlan"]:
+        freq = int(float(freq) * 1E6 + 0.1)
+        try:
+          color = mode_dict[mode]
+        except:
+          print ("Missing color for mode", mode)
+          color = '#777777'
+        plan.append([freq, color])
+      application.BandPlan = plan
+    else:
+      application.BandPlan = conf.BandPlan
+    if "MidiNoteDict" not in Settings[4]:
+      Settings[4]["MidiNoteDict"] = {}
+      self.settings_changed = True
+    self.MidiNoteDict = Settings[4]["MidiNoteDict"]
+    # Convert old to new format, October, 2021
+    for txt_note in list(local_conf.MidiNoteDict):	# txt_note is a string
+      int_note = int(txt_note, base=0)
+      if int_note < 128:
+        target = local_conf.MidiNoteDict[txt_note]
+        if len(target) > 3 and target[-3] == " " and target[-2] in "+-" and target[-1] in "0123456789":	# Jog wheel
+          key = "0xB0%02X" % int_note
+        elif target in ("Vol", "STo", "Rit", "Ys", "Yz", "Zo", "Tune"):		# Knob
+          key = "0xB0%02X" % int_note
+        else:	# Button. Enter as the Note On message.
+          key = "0x90%02X" % int_note
+        local_conf.MidiNoteDict[key] = target
+        del local_conf.MidiNoteDict[txt_note]
+        self.settings_changed = True
   def UpdateConf(self):		# Called second to update the configuration for the selected radio
+    # Items in the radio_dict are generally strings. Convert these strings to Python integers, floats,
+    # etc. and write them to conf.
     if Settings[1] == "ConfigFileRadio":
       return
     radio_dict = self.GetRadioDict()
@@ -215,7 +286,7 @@ class Configuration:
       conf.__dict__.update(conf.color_scheme_B)
     elif conf.color_scheme == 'C':
       conf.__dict__.update(conf.color_scheme_C)
-    self.RequiredValues(radio_dict)
+    self.RequiredValues(radio_dict)	# Why not update conf too??? This only updates the radio_dict.
     if errors:
       dlg = wx.MessageDialog(None, errors,
         'Update Settings', wx.OK|wx.ICON_ERROR)
@@ -300,7 +371,6 @@ class Configuration:
             pass
           else:
             print ('No config file value for', data_name)
- 
   def GetWidgets(self, app, hardware, conf, frame, gbs, vertBox):	# Called fifth
     if Settings[1] == "ConfigFileRadio":
       return False
@@ -313,27 +383,22 @@ class Configuration:
       if "BottomWidgets" in dct:
         app.bottom_widgets = dct['BottomWidgets'](app, hardware, conf, frame, gbs, vertBox)
     return True
-  def OnPageChanging(self, event):
+  def OnPageChanging(self, event):	# Called when the top level page changes (not RadioNotebook pages)
     event.Skip()
     notebook = event.GetEventObject()
     index = event.GetSelection()
-    if isinstance(notebook, RadioNotebook):	# second level notebook with pages for each radio
-      if index > 0:	# First tab is already finished
-        page = notebook.GetPage(index)
-        page.MakeControls()
+    page = notebook.GetPage(index)
+    if isinstance(page, RadioNotebook):
+      if not page.pages:
+        page.MakePages()
   def AddPages(self, notebk, width):	# Called sixth to add pages Help, Radios, all radio names
     global win_width
     win_width = width
     self.notebk = notebk
-    page = ConfigHelp(notebk)
-    notebk.AddPage(page, "Help with Radios")
     self.radio_page = Radios(notebk)
     notebk.AddPage(self.radio_page, "Radios")
     self.radios_page_start = notebk.GetPageCount()
-    if sys.platform == 'win32':		# On Windows, PAGE_CHANGING doesn't work
-      notebk.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.OnPageChanging)
-    else:
-      notebk.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGING, self.OnPageChanging)
+    notebk.Bind(wx.EVT_NOTEBOOK_PAGE_CHANGED, self.OnPageChanging, notebk)
     for name in Settings[2]:
       page = RadioNotebook(notebk, name)
       if name == Settings[1]:
@@ -384,10 +449,13 @@ class Configuration:
     return True
   def DeleteRadio(self, name):
     index = Settings[2].index(name)
-    n = self.radios_page_start + index
-    self.notebk.DeletePage(n)
     del Settings[2][index]
     del Settings[3][index]
+    try:
+      n = self.radios_page_start + index
+      self.notebk.DeletePage(n)
+    except:
+      pass
     return True
   def GetRadioDict(self, radio_name=None):	# None radio_name means the current radio
     if radio_name:
@@ -453,12 +521,32 @@ class Configuration:
     else:
       del Settings[2][index]
       del Settings[3][index]
-    for sdict in Settings[3]:		# Python None is saved as "null"
+    for sdict in Settings[3]:
+      # Fixup for prior errors that save dictionaries as strings
+      for name in ("tx_level", "HiQSDR_BandDict", "Hermes_BandDict", "Hermes_BandDictTx"):
+        if name in sdict:
+          if not isinstance(sdict[name], dict):
+            print ("Bad dictionary for", name)
+            sdict[name] = {}
+            self.settings_changed = True
+      # Python None is saved as "null"
       if "tx_level" in sdict:
         if "null" in sdict["tx_level"]:
           v = sdict["tx_level"]["null"]
           sdict["tx_level"][None] = v
           del sdict["tx_level"]["null"]
+    # Add global section if it is absent
+    length = len(Settings)
+    if length < 4:	# Serious error
+      pass
+    elif length == 4:	# Old file without global section
+      Settings.append({})
+      self.settings_changed = True
+    else:		# Settings[4] must be a dict
+      if not isinstance(Settings[4], dict):
+        Settings[4] = {}
+        self.settings_changed = True
+    self.globals = Settings[4]
   def SaveState(self):
     if not self.settings_changed:
       return
@@ -489,6 +577,8 @@ class Configuration:
     #     Then a list of possible value#explain with the default first
     #     Then a blank line to end.
     self.format4name = {}
+    for name in name2format:
+      self.format4name[name] = name2format[name][0]
     self.format4name['hardware_file_type'] = 'text'
     self._ParserConf('quisk_conf_defaults.py')
     # Read any user-defined radio types
@@ -508,6 +598,7 @@ class Configuration:
     re_AeqB = re.compile("^#?(\w+)\s*=\s*([^#]+)#*(.*)")		# item values "a = b"
     section = None
     data_name = None
+    multi_line = False
     fp = open(filename, "r")
     for line in fp:
       line = line.strip()
@@ -543,7 +634,18 @@ class Configuration:
         else:
           self.format4name[data_name] = fmt
         section_data.append([data_name, dspl, fmt, '', value_list])
+        multi_line = False
       if not data_name:
+        continue
+      if multi_line:
+        value += line
+        #print ("Multi", data_name, type(value), value)
+        count = self._multi_count(value)
+        if count == 0:
+          value = eval(value, conf.__dict__)
+          value_list.append(value)
+          #print ("Multi done", data_name, type(value), value)
+          multi_line = False
         continue
       mo = re_AeqB.match(line)
       if mo:
@@ -554,10 +656,22 @@ class Configuration:
         expln = mo.group(3).strip()
         if value[0] in ('"', "'"):
           value = value[1:-1]
-        elif value == '{':		# item is a dictionary
-          value = getattr(conf, data_name)
-        elif value == '[':		# item is a list
-          value = getattr(conf, data_name)
+        elif value[0] == '{':		# item is a dictionary
+          if self._multi_count(value) == 0:	# dictionary is complete
+            value = eval(value, conf.__dict__)
+            #print ("Single", data_name, type(value), value)
+          else:
+            multi_line = True
+            #print ("Start multi", data_name, type(value), value)
+            continue
+        elif value[0] == '[':		# item is a list
+          if self._multi_count(value) == 0:	# list is complete
+            value = eval(value, conf.__dict__)
+            #print ("Single", data_name, type(value), value)
+          else:
+            multi_line = True
+            #print ("Start multi", data_name, type(value), value)
+            continue
         if expln:
           value_list.append("%s # %s" % (value, expln))
         else:
@@ -565,8 +679,21 @@ class Configuration:
       elif line[0:2] == '# ':
         section_data[-1][3] = section_data[-1][3] + line[2:] + ' '
     fp.close()
+  def _multi_count(self, value):
+    char_start = value[0]
+    if char_start == '{':
+      char_end = '}'
+    elif char_start == '[':
+      char_end = ']'
+    count = 0
+    for ch in value:
+      if ch == char_start:
+        count += 1
+      elif ch == char_end:
+        count -= 1
+    return count
 
-class ConfigHelp(wx.html.HtmlWindow):	# The "Help with Radios" first-level page
+class xxConfigHelp(wx.html.HtmlWindow):	# The "Help with Radios" first-level page
   """Create the help screen for the configuration tabs."""
   def __init__(self, parent):
     wx.html.HtmlWindow.__init__(self, parent, -1, size=(win_width, 100))
@@ -700,6 +827,224 @@ class QPowerMeterCalibration(wx.Frame):
       else:
         self.table.append([rev, power])
 
+## Note: The amplitude/phase adjustments have ideas provided by Andrew Nilsson, VK6JBL.
+## October 2020: changed to make RxTx frequency and VFO two independent variables.
+class QAdjustPhase(wx.Frame):
+  """Create a window with amplitude and phase adjustment controls"""
+  f_ampl = "Amplitude adjustment %.6f"
+  f_phase = "Phase adjustment degrees %.6f"
+  def __init__(self, parent, width, rx_tx):
+    self.width = width
+    self.rx_tx = rx_tx		# Must be "rx" or "tx"
+    if rx_tx == 'tx':
+      self.is_tx = 1
+      t = "Adjust Sound Card Transmit Amplitude and Phase"
+    else:
+      self.is_tx = 0
+      t = "Adjust Sound Card Receive Amplitude and Phase"
+    wx.Frame.__init__(self, application.main_frame, -1, t, pos=(50, 100), style=wx.CAPTION)
+    self.panel = wx.Panel(self)
+    self.MakeControls()
+    self.Redraw()
+    self.Show()
+  def MakeControls(self):		# Make controls for phase/amplitude adjustment
+    panel = self.panel
+    width = self.width
+    self.old_amplitude, self.old_phase = application.GetAmplPhase(self.rx_tx)
+    self.new_amplitude, self.new_phase = self.old_amplitude, self.old_phase
+    sl_max = width * 4 // 10		# maximum +/- value for slider
+    self.ampl_scale = float(conf.rx_max_amplitude_correct) / sl_max
+    self.phase_scale = float(conf.rx_max_phase_correct) / sl_max
+    font = wx.Font(conf.default_font_size, wx.FONTFAMILY_SWISS, wx.NORMAL,
+          wx.FONTWEIGHT_NORMAL, False, conf.quisk_typeface)
+    self.SetFont(font)
+    charx = self.GetCharWidth()
+    self.tab1 = tab1 = charx
+    chary = self.GetCharHeight()
+    deltay = chary * 12 // 10
+    y = chary * 3 // 10
+    self.controls = []
+    txt = wx.StaticText(panel, -1, "No data", pos=(tab1, y))
+    self.controls.append(txt)
+    y += txt.GetSize().GetHeight()
+    #y += deltay * 14 // 10
+    self.t_ampl = wx.StaticText(panel, -1, self.f_ampl % self.old_amplitude, pos=(tab1, y))
+    self.controls.append(self.t_ampl)
+    y += deltay
+    fine = wx.StaticText(panel, -1, 'Fine', pos=(tab1, y))
+    self.controls.append(fine)
+    coarse = wx.StaticText(panel, -1, 'Coarse', pos=(tab1, y + deltay))
+    self.controls.append(coarse)
+    tab2 = tab1 + coarse.GetSize().GetWidth() + charx
+    sliderX = width - tab2 - charx
+    self.ampl1 = wx.Slider(panel, -1, 0, -sl_max, sl_max, pos=(tab2, y), size=(sliderX, -1))
+    self.controls.append(self.ampl1)
+    y += deltay
+    self.ampl2 = wx.Slider(panel, -1, 0, -sl_max, sl_max, pos=(tab2, y), size=(sliderX, -1))
+    self.controls.append(self.ampl2)
+    y += deltay * 14 // 10
+    self.PosAmpl(self.old_amplitude)
+    self.t_phase = wx.StaticText(panel, -1, self.f_phase % self.old_phase, pos=(tab1, y))
+    self.controls.append(self.t_phase)
+    y += deltay
+    fine = wx.StaticText(panel, -1, 'Fine', pos=(tab1, y))
+    self.controls.append(fine)
+    coarse = wx.StaticText(panel, -1, 'Coarse', pos=(tab1, y + deltay))
+    self.controls.append(coarse)
+    self.phase1 = wx.Slider(panel, -1, 0, -sl_max, sl_max, pos=(tab2, y), size=(sliderX, -1))
+    self.controls.append(self.phase1)
+    y += deltay
+    self.phase2 = wx.Slider(panel, -1, 0, -sl_max, sl_max, pos=(tab2, y), size=(sliderX, -1))
+    self.controls.append(self.phase2)
+    y += deltay
+    sv = QuiskPushbutton(panel, self.OnBtnSave, 'Save')
+    self.controls.append(sv)
+    dv = QuiskPushbutton(panel, self.OnBtnDestroyVFO, 'Destroy VFO')
+    self.controls.append(dv)
+    ds = QuiskPushbutton(panel, self.OnBtnDestroyALL, 'Destroy ALL')
+    self.controls.append(ds)
+    cn = QuiskPushbutton(panel, self.OnBtnFinished, 'Finished')
+    self.controls.append(cn)
+    hl = QuiskPushbutton(panel, self.OnBtnHelp, 'Help')
+    self.controls.append(hl)
+    w, h = ds.GetSize().Get()
+    sv.SetSize((w, h))
+    cn.SetSize((w, h))
+    hl.SetSize((w, h))
+    y += h * 5 // 10
+    x = (width - w * 5) // 6
+    sv.SetPosition((x, y))
+    dv.SetPosition((x*2 + w, y))
+    ds.SetPosition((x*3 + w*2, y))
+    cn.SetPosition((x*4 + w*3, y))
+    hl.SetPosition((x*5 + w*4, y))
+    sv.SetBackgroundColour('light blue')
+    dv.SetBackgroundColour('light blue')
+    ds.SetBackgroundColour('light blue')
+    cn.SetBackgroundColour('light blue')
+    hl.SetBackgroundColour('light blue')
+    y += h
+    y += h * 4 // 10
+    self.PosPhase(self.old_phase)
+    self.SetClientSize(wx.Size(width, y))
+    self.ampl1.Bind(wx.EVT_SCROLL, self.OnChange)
+    self.ampl2.Bind(wx.EVT_SCROLL, self.OnAmpl2)
+    self.phase1.Bind(wx.EVT_SCROLL, self.OnChange)
+    self.phase2.Bind(wx.EVT_SCROLL, self.OnPhase2)
+  def Redraw(self):
+    # Print available data points
+    self.band = application.lastBand
+    data = application.bandAmplPhase.get(self.band, {})
+    data = data.get(self.rx_tx, [])
+    if data:
+      t = "Band %s VFO and frequency list\n" % self.band
+      for vfo, items in data:
+        t += "%10d:" % vfo
+        for freq, ampl, phase in items:
+          t += " %7d" % freq
+        t += "\n"
+    else:
+      t = "Band %s: No data." % self.band
+    x, y = self.controls[0].GetPosition()
+    height = self.controls[0].GetSize().GetHeight()
+    self.controls[0].Destroy()
+    txt = wx.StaticText(self.panel, -1, t, pos=(self.tab1, y))
+    self.controls[0] = txt
+    delta = txt.GetSize().GetHeight() - height
+    for ctrl in self.controls[1:]:
+      x, y = ctrl.GetPosition()
+      y += delta
+      ctrl.Move(x, y)
+    h = self.GetClientSize().GetHeight()
+    self.SetClientSize(wx.Size(self.width, h + delta))
+  def PosAmpl(self, ampl):	# set pos1, pos2 for amplitude
+    pos2 = round(ampl / self.ampl_scale)
+    remain = ampl - pos2 * self.ampl_scale
+    pos1 = round(remain / self.ampl_scale * 50.0)
+    self.ampl1.SetValue(pos1)
+    self.ampl2.SetValue(pos2)
+  def PosPhase(self, phase):	# set pos1, pos2 for phase
+    pos2 = round(phase / self.phase_scale)
+    remain = phase - pos2 * self.phase_scale
+    pos1 = round(remain / self.phase_scale * 50.0)
+    self.phase1.SetValue(pos1)
+    self.phase2.SetValue(pos2)
+  def OnChange(self, event):
+    ampl = self.ampl_scale * self.ampl1.GetValue() / 50.0 + self.ampl_scale * self.ampl2.GetValue()
+    if abs(ampl) < self.ampl_scale * 3.0 / 50.0:
+      ampl = 0.0
+    self.t_ampl.SetLabel(self.f_ampl % ampl)
+    phase = self.phase_scale * self.phase1.GetValue() / 50.0 + self.phase_scale * self.phase2.GetValue()
+    if abs(phase) < self.phase_scale * 3.0 / 50.0:
+      phase = 0.0
+    self.t_phase.SetLabel(self.f_phase % phase)
+    QS.set_ampl_phase(ampl, phase, self.is_tx)
+    self.new_amplitude, self.new_phase = ampl, phase
+  def OnAmpl2(self, event):		# re-center the fine slider when the coarse slider is adjusted
+    ampl = self.ampl_scale * self.ampl1.GetValue() / 50.0 + self.ampl_scale * self.ampl2.GetValue()
+    self.PosAmpl(ampl)
+    self.OnChange(event)
+  def OnPhase2(self, event):	# re-center the fine slider when the coarse slider is adjusted
+    phase = self.phase_scale * self.phase1.GetValue() / 50.0 + self.phase_scale * self.phase2.GetValue()
+    self.PosPhase(phase)
+    self.OnChange(event)
+  def OnBtnDestroyVFO(self, event):	# Remove entry with the application VFO
+    data = application.bandAmplPhase.get(self.band, {})
+    data = data.get(self.rx_tx, [])
+    for i in range(len(data)):
+      if data[i][0] == application.VFO:
+        del data[i]
+        break
+    self.Redraw()
+  def OnBtnSave(self, event):
+    data = application.bandAmplPhase
+    if self.band not in data:
+      data[self.band] = {}
+    data = data[self.band]
+    if self.rx_tx not in data:
+      data[self.rx_tx] = []
+    data = data[self.rx_tx]
+    for vfo, items in data:		# All items must be lists, not tuples
+      if vfo == application.VFO:
+        for i in range(len(items)):
+          item = items[i]
+          if item[0] == application.rxFreq:
+            item[1] = self.new_amplitude
+            item[2] = self.new_phase
+            break
+        else:
+          items.append([application.rxFreq, self.new_amplitude, self.new_phase])
+          items.sort()
+        break
+    else:
+      data.append([application.VFO, [[application.rxFreq, self.new_amplitude, self.new_phase]]])
+      data.sort()
+    self.Redraw()
+  def OnBtnDestroyALL(self, event):
+    dlg = wx.MessageDialog(self, "This will destroy all data for band %s!" % self.band,
+      "Destroy Data", style = wx.YES|wx.NO)
+    if dlg.ShowModal() == wx.ID_YES:
+      if self.band in application.bandAmplPhase:
+        del application.bandAmplPhase[self.band]
+      self.Redraw()
+  def OnBtnFinished(self, event=None):
+    ampl, phase = application.GetAmplPhase(self.rx_tx)
+    QS.set_ampl_phase(ampl, phase, self.is_tx)
+    application.w_phase = None
+    self.Destroy()
+  def OnBtnHelp(self, event=None):
+    dlg = wx.MessageDialog(self,
+'The "VFO" is the frequency at the center of the graph screen. The Rx or Tx frequency is the offset from the VFO. \
+Adjust the VFO and the frequency as desired.  Then adjust the sliders to minimize the image. Press "Save" when satisfied. \
+To adjust the VFO, use the band Up/Down buttons, or right click the graph at the desired VFO. \
+Adjustments must be made for both receive and transmit on each band. \
+The maximum slider adjustment range can be changed on the radio Hardware screen. \
+The other buttons will delete the data for the current VFO, or for the whole band. \
+For more information, press the main "Help" button, \
+then "Documentation", then "SoftRock".'
+    , "Adjustment Help", style=wx.OK)
+    dlg.ShowModal()
+
 class ListEditDialog(wx.Dialog):	# Display a dialog with a List-Edit control, plus Ok/Cancel
   def __init__(self, parent, title, choice, choices, width):
     wx.Dialog.__init__(self, parent, title=title, style=wx.CAPTION|wx.CLOSE_BOX)
@@ -725,6 +1070,8 @@ class RadioNotebook(wx.Notebook):	# The second-level notebook for each radio nam
     self.SetBackgroundColour(parent.bg_color)
     self.radio_name = radio_name
     self.pages = []
+  def MakePages(self):
+    radio_name = self.radio_name
     radio_dict = local_conf.GetRadioDict(radio_name)
     radio_type = radio_dict['hardware_file_type']
     if radio_type == 'SoapySDR':
@@ -745,32 +1092,104 @@ class RadioNotebook(wx.Notebook):	# The second-level notebook for each radio nam
     page = RadioBands(self, radio_name)
     self.AddPage(page, "Bands")
     self.pages.append(page)
-    if "use_rx_udp" in radio_dict and radio_dict["use_rx_udp"] == '10':
-      page = RadioFilters(self, radio_name)
-      self.AddPage(page, "Filters")
-      self.pages.append(page)
+    #if "use_rx_udp" in radio_dict and radio_dict["use_rx_udp"] == '10':
+    #  page = RadioFilters(self, radio_name)
+    #  self.AddPage(page, "Filters")
+    #  self.pages.append(page)
   def NewName(self, new_name):
     self.radio_name = new_name
     for page in self.pages:
       page.radio_name = new_name
+
+class ChoiceCombo(wx.Choice):
+  text_for_blank = "-blank-"
+  def __init__(self, parent, value, choices):
+    wx.Choice.__init__(self, parent, choices=choices)
+    self.choices = choices[:]
+    self.handler = None
+    try:
+      index = self.choices.index(value)
+    except:
+      index = 0
+    self.Bind(wx.EVT_CHOICE, self.OnChoice)
+    self._ChangeItems(index)
+  def _ChangeItems(self, index):
+    length = len(self.choices)
+    if length <= 0:
+      self.Enable(False)
+    elif length == 1:
+      wx.Choice.SetSelection(self, 0)
+      self.Enable(False)
+    else:
+      wx.Choice.SetSelection(self, index)
+      self.Enable(True)
+    self._ReplaceBlank()
+    self.GetValue()
+  def _ReplaceBlank(self):
+    try:
+      n = self.choices.index('')
+    except:
+      pass
+    else:
+      self.SetString(n, self.text_for_blank)
+  def SetItems(self, lst):
+    wx.Choice.SetItems(self, lst)
+    self.choices = lst[:]
+    self._ChangeItems(0)
+  def SetSelection(self, n):
+    if 0 <= n < len(self.choices):
+      wx.Choice.SetSelection(self, n)
+    self.GetValue()
+  def SetText(self, text):
+    try:
+      n = self.choices.index(text)
+    except:
+      print("Failed to set choice list to", text)
+    else:
+      wx.Choice.SetSelection(self, n)
+    self.GetValue()
+  def GetValue(self):
+    n = self.GetSelection()
+    if n == wx.NOT_FOUND:
+      self.value = ''
+    else:
+      self.value = self.GetString(n)
+      if self.value == self.text_for_blank:
+        self.value = ''
+    return self.value
+  def OnChoice(self, event):
+    event.Skip()
+    old = self.value
+    self.GetValue()
+    if self.value != old:
+      if self.handler:
+        self.handler(self)
 
 class ComboCtrl(wxcombo.ComboCtrl):
   def __init__(self, parent, value, choices, no_edit=False):
     self.value = value
     self.choices = choices[:]
     self.handler = None
-    self.err_check = None
     self.height = parent.quisk_height
+    self.dirty = False
+    try:
+      self.bgColor = wx.SystemSettings.GetColour(wx.SYS_COLOUR_LISTBOX)
+    except:
+      self.bgColor = wx.Colour('#f6f5f4')
     if no_edit:
       wxcombo.ComboCtrl.__init__(self, parent, -1, style=wx.CB_READONLY)
     else:
       wxcombo.ComboCtrl.__init__(self, parent, -1, style=wx.TE_PROCESS_ENTER)
-      self.GetTextCtrl().Bind(wx.EVT_KILL_FOCUS, self.OnKillFocus)
+      self.Bind(wx.EVT_KILL_FOCUS, self.OnKillFocus)
+      self.Bind(wx.EVT_TEXT, self.OnText)
       self.Bind(wx.EVT_TEXT_ENTER, self.OnTextEnter)
+    self.SetBackgroundColour(self.bgColor)
+    self.Refresh()
     self.ctrl = ListBoxComboPopup(choices, parent.font)
     self.SetPopupControl(self.ctrl)
     self.SetText(value)
     self.SetSizes()
+    self.Bind(wx.EVT_COMBOBOX_CLOSEUP, self.OnCloseup)
   def SetItems(self, lst):
     self.ctrl.SetItems(lst)
     self.choices = lst[:]
@@ -787,7 +1206,7 @@ class ComboCtrl(wxcombo.ComboCtrl):
         wm = w
     wm += charx * 5
     self.SetSizeHints(wm, self.height, 9999, self.height)
-  def SetSelection(self, n):
+  def SetSelection(self, n):	# Set text to item in list box. Name conflict with wxcombo.ComboCtrl.
     try:
       text = self.choices[n]
     except IndexError:
@@ -797,26 +1216,39 @@ class ComboCtrl(wxcombo.ComboCtrl):
       self.ctrl.SetSelection(n)
       self.SetText(text)
       self.value = text
+  def OnText(self, event):
+    self.dirty = True
+    self.SetBackgroundColour('#e0e0ff')
+    self.Refresh()
   def OnTextEnter(self, event=None):
+    self.SetBackgroundColour(self.bgColor)
+    self.Refresh()
+    self.dirty = False
     if event:
       event.Skip()
     new = self.GetValue()
     if self.value != new:
-      if self.err_check:
-        ok = self.err_check(self)
-        if not ok:
-          self.SetText(self.value)
-          return
       self.value = new
       if self.handler:
         self.handler(self)
   def OnKillFocus(self, event):
     event.Skip()
-    self.OnTextEnter(event)
+    if self.dirty:
+      self.OnTextEnter(None)
   def OnListbox(self):
+    self.Dismiss()
     self.OnTextEnter()
+  def OnButtonClick(self):
+    wxcombo.ComboCtrl.OnButtonClick(self)
+    wxcombo.ComboCtrl.SetSelection(self, 0, 0)
+    wxcombo.ComboCtrl.SetInsertionPointEnd(self)
+  def OnCloseup(self, event):
+    event.Skip()
+    wxcombo.ComboCtrl.SetSelection(self, 0, 0)
+    wxcombo.ComboCtrl.SetInsertionPointEnd(self)
 
 class ListBoxComboPopup(wxcombo.ComboPopup):
+  text_for_blank = "-blank-"
   def __init__(self, choices, font):
     wxcombo.ComboPopup.__init__(self)
     self.choices = choices
@@ -824,28 +1256,42 @@ class ListBoxComboPopup(wxcombo.ComboPopup):
     self.lbox = None
     self.index = None
   def Create(self, parent):
-    self.lbox = wx.ListBox(parent, choices=self.choices, style=wx.LB_SINGLE)
+    self.lbox = wx.ListBox(parent, choices=self.choices, style=wx.LB_SINGLE|wx.LB_NEEDED_SB)
     self.lbox.SetFont(self.font)
     self.lbox.Bind(wx.EVT_MOTION, self.OnMotion)
     self.lbox.Bind(wx.EVT_LEFT_DOWN, self.OnLeftDown)
+    self._ReplaceBlank()
     return True
   def SetItems(self, lst):
     self.choices = lst[:]
     self.lbox.Set(self.choices)
+    self._ReplaceBlank()
+  def _ReplaceBlank(self):
+    try:
+      n = self.choices.index('')
+    except:
+      pass
+    else:
+      self.lbox.SetString(n, self.text_for_blank)
   def SetSelection(self, n):
     self.lbox.SetSelection(n)
   def GetStringValue(self):
     try:
-      return self.choices[self.lbox.GetSelection()]
+      text = self.choices[self.lbox.GetSelection()]
     except IndexError:
-      pass
-    return ''
+      text = ''
+    else:
+      if text == self.text_for_blank:
+        text = ''
+    return text
   def GetAdjustedSize(self, minWidth, prefHeight, maxHeight):
     chary = self.lbox.GetCharHeight()
-    return (minWidth, chary * len(self.choices) * 15 // 10 + chary)
+    height = chary * len(self.choices) * 15 // 10 + chary
+    if height > prefHeight:
+      height = prefHeight
+    return (minWidth, height)
   def OnLeftDown(self, event):
     event.Skip()
-    self.Dismiss()
     self.index = self.lbox.GetSelection()	# index of selected item
     if wxVersion in ('2', '3'):
       self.GetCombo().OnListbox()
@@ -859,9 +1305,250 @@ class ListBoxComboPopup(wxcombo.ComboPopup):
   def GetControl(self):
     return self.lbox
 
-class BaseWindow(wx.ScrolledWindow):
+class QuiskTextCtrl(wx.TextCtrl):
+  def __init__(self, parent, text, style):
+    wx.TextCtrl.__init__(self, parent, -1, text, style=style)
+    self.dirty = False
+    self.bgColor = wx.Colour('#f6f5f4')
+    #self.Bind(wx.EVT_KILL_FOCUS, self.OnKillFocus)
+    if not (style & wx.TE_READONLY):
+      self.Bind(wx.EVT_TEXT, self.OnText)
+      self.Bind(wx.EVT_TEXT_ENTER, self.OnTextEnter)
+  def SetValue(self, value):
+    wx.TextCtrl.SetValue(self, value)
+    self.SetBackgroundColour(self.bgColor)
+    self.Refresh()
+    self.dirty = False
+  def OnText(self, event):
+    event.Skip()
+    self.dirty = True
+    self.SetBackgroundColour('#e0e0ff')
+    self.Refresh()
+  def OnTextEnter(self, event=None):
+    if event:
+      event.Skip()
+    self.SetBackgroundColour(self.bgColor)
+    self.Refresh()
+    self.dirty = False
+  #def OnKillFocus(self, event):
+  #  event.Skip()
+  #  if self.dirty:
+  #    self.OnTextEnter(None)
+
+class QuiskControl(wx.Control):
+  def __init__(self, parent, text, height, pos=wx.DefaultPosition, style=0):
+    wx.Control.__init__(self, parent, -1, pos=pos, style=style)
+    self.text = text
+    self.handler = None
+    self.value = ''
+    if wxVersion in ('2', '3'):
+      self.SetBackgroundStyle(wx.BG_STYLE_CUSTOM)
+    else:
+      self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
+    from quisk_widgets import button_font
+    self.SetFont(button_font)
+    w, h = self.GetTextExtent(text)
+    self.SetSizeHints(w + height * 3, height, 999, height)
+    self.bg_brush = wx.Brush('#dcdcdc')
+    self.black_brush = wx.Brush(wx.Colour(0x000000))
+    self.text_color = wx.Colour(0x000000)
+    self.black_pen = wx.Pen(self.text_color)
+    self.no_pen = wx.Pen(self.text_color, style=wx.PENSTYLE_TRANSPARENT)
+    self.Bind(wx.EVT_PAINT, self.OnPaint)
+    self.Bind(wx.EVT_LEFT_DOWN, self.OnLeftDown)
+    self.MakeMenu()
+  def OnPaint(self, event):
+    dc = wx.AutoBufferedPaintDC(self)
+    dc.SetBackground(self.bg_brush)
+    dc.SetTextForeground(self.text_color)
+    dc.Clear()
+    self._Glyph1(dc)
+  def _Glyph1(self, dc):
+    win_w, win_h = self.GetClientSize()
+    x = win_w - win_h
+    l = win_h  * 20 // 100
+    if l < 3:
+      l = 3
+    y = win_h // 2 - 2
+    pen = wx.Pen('#555555', 1)
+    dc.SetPen(pen)
+    points = [(0, 0), (l, l), (l + 1, l), (l * 2 + 2, -1)]
+    dc.DrawLines(points, x, y)
+    pen = wx.Pen('#888888', 1)
+    dc.SetPen(pen)
+    points = [(1, 0), (l, l - 1), (l + 1, l - 1), (l * 2 + 1, -1)]
+    dc.DrawLines(points, x, y)
+    w, h = dc.GetTextExtent(self.text)
+    x = (win_w - win_h - w) // 2
+    if x < 0:
+      x = 0
+    y = (win_h - h) // 2
+    if y < 0:
+      y = 0
+    dc.DrawText(self.text, x, y)
+  def _Glyph2(self, dc):	# Not used
+    dc.SetBrush(self.black_brush)
+    win_w, win_h = self.GetClientSize()
+    spacing = 2
+    rect_h = (win_h - spacing * 4) // 3
+    if rect_h % 2 == 0:		# Make rect_h an odd number
+      rect_h -= 1
+    spacing = (win_h - rect_h * 3) // 4
+    width = rect_h * 25 // 10
+    x0 = win_w - (rect_h + 2 + width + 3)
+    y0 = (win_h - rect_h * 3 - spacing * 2) // 2
+    x = (x0 - dc.GetCharWidth()) // 2
+    y = (win_h - dc.GetCharHeight()) // 2
+    dc.DrawText(u"\u2BA9", x, y)
+    for y in range(3):
+      dc.SetPen(self.no_pen)
+      dc.DrawRectangle(x0, y0, rect_h, rect_h)
+      x = x0 + rect_h + 2
+      y = y0 + rect_h // 2
+      dc.SetPen(self.black_pen)
+      dc.DrawLine(x, y, x + width, y)
+      y0 += rect_h + spacing
+  def MakeMenu(self):
+    self.menu = wx.Menu()
+  def OnLeftDown(self, event):
+    pos = wx.Point(0, 0)
+    self.PopupMenu(self.menu, pos)
+
+class MidiButton(QuiskControl):
+  def __init__(self, parent, text, height, pos=wx.DefaultPosition, style=0):
+    QuiskControl.__init__(self, parent, text, height, pos, style)
+  def MakeMenu(self):
+    main_names = []
+    bands = wx.Menu()
+    filters = wx.Menu()
+    modes = wx.Menu()
+    screens = wx.Menu()
+    for idName in application.idName2Button:
+      if not idName:
+        item = None
+      elif idName in conf.BandList or idName in ("Audio", "Time"):
+        item = bands.Append(-1, idName)
+      elif idName[0:7] == 'Filter ':
+        item = filters.Append(-1, idName)
+      elif idName in ("CW U/L", "CWL", "CWU", "SSB U/L", "LSB", "USB", "AM", "FM", "DGT",
+                      "DGT-U", "DGT-L", "DGT-FM", "DGT-IQ", "FDV", "FDV-U", "IMD", ):
+        item = modes.Append(-1, idName)
+      elif idName in ("Graph", "GraphP1", "GraphP2", "WFall", "Scope", "Config", "Audio FFT", "Bscope", "RX Filter", "Help"):
+        item = screens.Append(-1, idName)
+      else:
+        item = None
+        main_names.append(idName)
+      if item:
+        self.Bind(wx.EVT_MENU, self.OnMenu, item)
+    main_names.sort()
+    self.menu = wx.Menu()
+    main1 = wx.Menu()
+    main2 = wx.Menu()
+    for name in main_names:
+      if name[0].upper() in "ABCDEFGHIJKLMN":
+        item = main1.Append(-1, name)
+      else:
+        item = main2.Append(-1, name)
+      self.Bind(wx.EVT_MENU, self.OnMenu, item)
+    self.menu.AppendSubMenu(main1, "Button A-N")
+    self.menu.AppendSubMenu(main2, "Button O-Z")
+    item = self.menu.AppendSubMenu(bands, "Bands")
+    if bands.GetMenuItemCount() <= 0:
+      self.menu.Enable(item.GetId(), False)
+    item = self.menu.AppendSubMenu(filters, "Filters")
+    if filters.GetMenuItemCount() <= 0:
+      self.menu.Enable(item.GetId(), False)
+    item = self.menu.AppendSubMenu(modes, "Modes")
+    if modes.GetMenuItemCount() <= 0:
+      self.menu.Enable(item.GetId(), False)
+    item = self.menu.AppendSubMenu(screens, "Screens")
+    if screens.GetMenuItemCount() <= 0:
+      self.menu.Enable(item.GetId(), False)
+  def OnMenu(self, event):
+    self.value = self.menu.GetLabel(event.GetId())
+    if self.handler:
+      self.handler(self)
+
+class MidiKnob(QuiskControl):
+  def __init__(self, parent, text, height, pos=wx.DefaultPosition, style=0):
+    QuiskControl.__init__(self, parent, text, height, pos, style)
+  def MakeMenu(self):
+    self.menu = wx.Menu()
+    for name in application.midiControls:
+      ctrl, func = application.midiControls[name]
+      if not ctrl or not func:
+        continue
+      item = self.menu.Append(-1, name)
+      self.Bind(wx.EVT_MENU, self.OnMenu, item)
+  def OnMenu(self, event):
+    self.value = self.menu.GetLabel(event.GetId())
+    if self.handler:
+      self.handler(self)
+
+class MidiJogWheel(QuiskControl):
+  def __init__(self, parent, text, height, pos=wx.DefaultPosition, style=0):
+    self.jog_direction = "+"
+    self.jog_speed = "5"
+    self.MakeText()
+    QuiskControl.__init__(self, parent, self.text, height, pos, style)
+  def MakeText(self):
+    self.text = "Jog Wheel  %s%s" % (self.jog_direction, self.jog_speed)
+  def MakeMenu(self):
+    self.menu = wx.Menu()
+    self.direc_menu = wx.Menu()
+    item = self.direc_menu.AppendRadioItem(-1, "Move +")
+    self.Bind(wx.EVT_MENU, self.OnDirecMenu, item)
+    item = self.direc_menu.AppendRadioItem(-1, "Move -")
+    self.Bind(wx.EVT_MENU, self.OnDirecMenu, item)
+    self.menu.AppendSubMenu(self.direc_menu, "Direction")
+    self.speed_menu = wx.Menu()
+    for i in range(10):
+      item = self.speed_menu.AppendRadioItem(-1, "Speed %d" % i)
+      self.Bind(wx.EVT_MENU, self.OnSpeedMenu, item)
+      if i == 5:
+        item.Check()
+    self.menu.AppendSubMenu(self.speed_menu, "Speed")
+    controls = wx.Menu()
+    for name in application.midiControls:
+      ctrl, func = application.midiControls[name]
+      if not ctrl or not func:
+        continue
+      item = controls.Append(-1, name)
+      self.Bind(wx.EVT_MENU, self.OnMenu, item)
+    self.menu.AppendSubMenu(controls, "Name")
+  def OnMenu(self, event):
+    value = self.menu.GetLabel(event.GetId())
+    self.value = "%s %s%s" % (value, self.jog_direction, self.jog_speed)
+    if self.handler:
+      self.handler(self)
+  def OnDirecMenu(self, event):
+    value = self.menu.GetLabel(event.GetId())
+    self.jog_direction = value[-1]
+    self.MakeText()
+    self.Refresh()
+    if self.handler:
+      self.handler(self, "%s%s" % (self.jog_direction, self.jog_speed))
+  def OnSpeedMenu(self, event):
+    value = self.menu.GetLabel(event.GetId())
+    self.jog_speed = value[-1]
+    self.MakeText()
+    self.Refresh()
+    if self.handler:
+      self.handler(self, "%s%s" % (self.jog_direction, self.jog_speed))
+  def ChangeSelection(self, text):
+    self.jog_direction = text[0]
+    self.jog_speed = text[1]
+    self.MakeText()
+    self.Refresh()
+    if self.jog_direction == '+':
+      self.direc_menu.FindItemByPosition(0).Check()
+    else:
+      self.direc_menu.FindItemByPosition(1).Check()
+    index = int(self.jog_speed)
+    self.speed_menu.FindItemByPosition(index).Check()
+
+class ControlMixin:
   def __init__(self, parent):
-    wx.ScrolledWindow.__init__(self, parent)
     self.font = wx.Font(conf.config_font_size, wx.FONTFAMILY_SWISS, wx.NORMAL,
           wx.FONTWEIGHT_NORMAL, False, conf.quisk_typeface)
     self.SetFont(self.font)
@@ -884,6 +1571,14 @@ class BaseWindow(wx.ScrolledWindow):
       self.row += 1
     else:
       self.row = row
+  def AddHelpButton(self, col, text, help_text, border=1):
+    hbtn = QuiskPushbutton(self, self._BTnHelp, "..")
+    hbtn.SetColorGray()
+    hbtn.quisk_help_text = help_text
+    hbtn.quisk_caption = text
+    h = self.quisk_height + 2
+    hbtn.SetSizeHints(h, h, h, h)
+    self.gbs.Add(hbtn, (self.row, col), flag=wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, border=self.charx*border)
   def AddTextL(self, col, text, span=None):
     c = wx.StaticText(self, -1, text)
     if col < 0:
@@ -938,12 +1633,42 @@ class BaseWindow(wx.ScrolledWindow):
     else:
       self.gbs.Add(bsizer, (self.row, col), span=(1, span), flag = 0)
     return bsizer
-  def AddTextEditHelp(self, col, text1, text2, help_text, border=2, span1=1, span2=1):
+  def AddTextColorChangeHelp(self, col, text, color, btn_text, handler, help_text, border=2, span1=1, span2=1, span3=1):
+    txt = wx.StaticText(self, -1, text)
+    self.gbs.Add(txt, (self.row, col), span=(1, span1), flag=wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, border=self.charx)
+    col += span1
+    Cbar = wx.StaticText(self, -1, '')
+    h = self.quisk_height - 2
+    Cbar.SetSizeHints(h, h, -1, h)
+    if color:
+      Cbar.SetBackgroundColour(color)
+    self.gbs.Add(Cbar, (self.row, col), span=(1, span2),
+       flag=wx.ALIGN_CENTER_VERTICAL|wx.EXPAND|wx.RIGHT,
+       border=self.charx*2//10)
+    col += span2
+    btn = QuiskPushbutton(self, handler, btn_text)
+    btn.SetColorGray()
+    h = self.quisk_height + 2
+    btn.SetSizeHints(-1, h, -1, h)
+    self.gbs.Add(btn, (self.row, col), span=(1, span3), flag = wx.EXPAND)
+    col += span3
+    hbtn = QuiskPushbutton(self, self._BTnHelp, "..")
+    hbtn.SetColorGray()
+    hbtn.quisk_help_text = help_text
+    hbtn.quisk_caption = text
+    h = self.quisk_height + 2
+    hbtn.SetSizeHints(h, h, h, h)
+    self.gbs.Add(hbtn, (self.row, col), flag=wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, border=self.charx*border)
+    return txt, Cbar, btn
+  def AddTextEditHelp(self, col, text1, text2, help_text, border=2, span1=1, span2=1, no_edit=True):
     txt = wx.StaticText(self, -1, text1)
     self.gbs.Add(txt, (self.row, col), span=(1, span1), flag=wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, border=self.charx)
     col += span1
     #txt = wx.StaticText(self, -1, text2)
-    edt = wx.TextCtrl(self, -1, text2, style=wx.TE_READONLY)
+    if no_edit:
+      edt = QuiskTextCtrl(self, text2, style=wx.TE_READONLY)
+    else:
+      edt = QuiskTextCtrl(self, text2, style=wx.TE_PROCESS_ENTER)
     #self.gbs.Add(txt, (self.row, col), span=(1, span2), flag=wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, border=self.charx)
     self.gbs.Add(edt, (self.row, col), span=(1, span2),
        flag=wx.ALIGN_CENTER_VERTICAL|wx.EXPAND|wx.RIGHT,
@@ -957,23 +1682,114 @@ class BaseWindow(wx.ScrolledWindow):
     btn.SetSizeHints(h, h, h, h)
     self.gbs.Add(btn, (self.row, col), flag=wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, border=self.charx*border)
     return txt, edt, btn
-  def AddTextButtonHelp(self, col, text, butn_text, handler, help_text):
-    border = 1
-    txt = wx.StaticText(self, -1, text)
-    self.gbs.Add(txt, (self.row, col), flag = 0)
+  def AddTextSliderHelp(self, col, text, value, themin, themax, handler, help_text, border=2, span=1, scale=1):
+    display = "%" in text
+    sld = SliderBoxHH(self, text, value, themin, themax, handler, display, scale)
+    self.gbs.Add(sld, (self.row, col), span=(1, span),
+       flag=wx.ALIGN_CENTER_VERTICAL|wx.EXPAND|wx.RIGHT,
+       border=self.charx*2//10)
+    col += span
+    btn = QuiskPushbutton(self, self._BTnHelp, "..")
+    btn.SetColorGray()
+    btn.quisk_help_text = help_text
+    btn.quisk_caption = text
+    h = self.quisk_height + 2
+    btn.SetSizeHints(h, h, h, h)
+    self.gbs.Add(btn, (self.row, col), flag=wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, border=self.charx*border)
+    return sld, btn
+  def AddPopupMenuHelp(self, Qclass, col, text, btn_text, help_text, span1=1, span2=1, border=1):
+    if text:
+      txt = wx.StaticText(self, -1, text)
+      self.gbs.Add(txt, (self.row, col), span=(1, span1), flag=wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, border=self.charx)
+      col += span1
+    ctrl = Qclass(self, btn_text, self.quisk_height - 2, style=wx.BORDER_RAISED)
+    self.gbs.Add(ctrl, (self.row, col), span=(1, span2), flag = wx.EXPAND|wx.RIGHT|wx.TOP|wx.BOTTOM|wx.LEFT, border=2)
+    col += span2
+    self.AddHelpButton(col, text, help_text, border)
+    return ctrl
+  def AddTextButtonHelp(self, col, text, butn_text, handler, help_text, span1=1, span2=1, border=1):
+    if text:
+      txt = wx.StaticText(self, -1, text)
+      self.gbs.Add(txt, (self.row, col), span=(1, span1), flag = 0)
+      col += span1
+    else:
+      txt = None
     btn = QuiskPushbutton(self, handler, butn_text)
     btn.SetColorGray()
     h = self.quisk_height + 2
     btn.SetSizeHints(-1, h, -1, h)
-    self.gbs.Add(btn, (self.row, col + 1), flag = wx.EXPAND)
+    self.gbs.Add(btn, (self.row, col), span=(1, span2), flag = wx.EXPAND)
+    col += span2
     hbtn = QuiskPushbutton(self, self._BTnHelp, "..")
     hbtn.SetColorGray()
     hbtn.quisk_help_text = help_text
     hbtn.quisk_caption = text
     h = self.quisk_height + 2
     hbtn.SetSizeHints(h, h, h, h)
-    self.gbs.Add(hbtn, (self.row, col + 2), flag=wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, border=self.charx*border)
+    self.gbs.Add(hbtn, (self.row, col), flag=wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, border=self.charx*border)
     return txt, btn
+  def AddText2CheckHelp(self, col, text, butn1_text, handler1, butn2_text, handler2, help_text, span1=1, span2=1, border=1):
+    if text:
+      txt = wx.StaticText(self, -1, text)
+      self.gbs.Add(txt, (self.row, col), span=(1, span1), flag = wx.ALIGN_CENTER_VERTICAL | wx.EXPAND)
+      col += span1
+    else:
+      txt = None
+    btn1 = QuiskCheckbutton(self, handler1, butn1_text)
+    btn1.SetColorGray()
+    btn2 = QuiskCheckbutton(self, handler2, butn2_text)
+    btn2.SetColorGray()
+    w1 = btn1.GetSize().Width
+    w2 = btn2.GetSize().Width
+    w = max(w1, w2)
+    h = self.quisk_height + 2
+    btn1.SetSizeHints(w, h, w, h)
+    btn2.SetSizeHints(w, h, w, h)
+    bsizer = wx.BoxSizer(wx.HORIZONTAL)
+    bsizer.Add(btn1, proportion=1)
+    bsizer.Add(2, h, proportion=0)
+    bsizer.Add(btn2, proportion=1)
+    self.gbs.Add(bsizer, (self.row, col), span=(1, span2), flag = wx.EXPAND)
+    col += span2
+    hbtn = QuiskPushbutton(self, self._BTnHelp, "..")
+    hbtn.SetColorGray()
+    hbtn.quisk_help_text = help_text
+    hbtn.quisk_caption = text
+    h = self.quisk_height + 2
+    hbtn.SetSizeHints(h, h, h, h)
+    self.gbs.Add(hbtn, (self.row, col), flag=wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, border=self.charx*border)
+    return txt, btn1, btn2
+  def AddText2ButtonHelp(self, col, text, butn1_text, handler1, butn2_text, handler2, help_text, span1=1, span2=1, border=1):
+    if text:
+      txt = wx.StaticText(self, -1, text)
+      self.gbs.Add(txt, (self.row, col), span=(1, span1), flag = 0)
+      col += span1
+    else:
+      txt = None
+    btn1 = QuiskPushbutton(self, handler1, butn1_text)
+    btn1.SetColorGray()
+    btn2 = QuiskPushbutton(self, handler2, butn2_text)
+    btn2.SetColorGray()
+    w1 = btn1.GetSize().Width
+    w2 = btn2.GetSize().Width
+    w = max(w1, w2)
+    h = self.quisk_height + 2
+    btn1.SetSizeHints(w, h, 999, h)
+    btn2.SetSizeHints(w, h, 999, h)
+    bsizer = wx.BoxSizer(wx.HORIZONTAL)
+    bsizer.Add(btn1, proportion=1)
+    bsizer.Add(2, h, proportion=0)
+    bsizer.Add(btn2, proportion=1)
+    self.gbs.Add(bsizer, (self.row, col), span=(1, span2), flag = wx.EXPAND)
+    col += span2
+    hbtn = QuiskPushbutton(self, self._BTnHelp, "..")
+    hbtn.SetColorGray()
+    hbtn.quisk_help_text = help_text
+    hbtn.quisk_caption = text
+    h = self.quisk_height + 2
+    hbtn.SetSizeHints(h, h, h, h)
+    self.gbs.Add(hbtn, (self.row, col), flag=wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, border=self.charx*border)
+    return txt, btn1, btn2
   def AddTextCtrl(self, col, text, handler=None, span=None):
     c = wx.TextCtrl(self, -1, text, style=wx.TE_RIGHT)
     if col < 0:
@@ -991,7 +1807,7 @@ class BaseWindow(wx.ScrolledWindow):
     return bsizer
   def AddColSpacer(self, col, width):		# add a width spacer to row 0
     self.gbs.Add((width * self.charx, 1), (0, col))		# width is in characters
-  def AddRadioButton(self, col, text, span=None, start=False):
+  def AddRadioButton(self, col, text, handler=None, span=None, start=False):
     if start:
       c = wx.RadioButton(self, -1, text, style=wx.RB_GROUP)
     else:
@@ -1002,6 +1818,8 @@ class BaseWindow(wx.ScrolledWindow):
       self.gbs.Add(c, (self.row, col), flag=wx.ALIGN_CENTER_VERTICAL)
     else:
       self.gbs.Add(c, (self.row, col), span=(1, span), flag=wx.ALIGN_CENTER_VERTICAL)
+    if handler:
+      c.Bind(wx.EVT_RADIOBUTTON, handler)
     return c
   def AddCheckBox(self, col, text, handler=None, flag=0, border=0):
     btn = wx.CheckBox(self, -1, text)
@@ -1043,7 +1861,10 @@ class BaseWindow(wx.ScrolledWindow):
       self.gbs.Add(btn, (self.row, col), flag=wx.ALIGN_RIGHT|wx.RIGHT|wx.LEFT, border=border*self.charx)
     return btn
   def AddComboCtrl(self, col, value, choices, right=False, no_edit=False, span=None, border=1):
-    cb = ComboCtrl(self, value, choices, no_edit)
+    if no_edit:
+      cb = ChoiceCombo(self, value, choices)
+    else:
+      cb = ComboCtrl(self, value, choices)
     if col < 0:
       pass
     elif span is None:
@@ -1134,7 +1955,11 @@ class BaseWindow(wx.ScrolledWindow):
     return txt, spn, btn
   def _BTnHelp(self, event):
     btn = event.GetEventObject()
-    dlg = wx.MessageDialog(self, btn.quisk_help_text, btn.quisk_caption, style=wx.OK|wx.ICON_INFORMATION)
+    caption = btn.quisk_caption
+    i = caption.find('%')	# remove formats %.2f
+    if i > 0:
+      caption = caption[0:i]
+    dlg = wx.MessageDialog(self, btn.quisk_help_text, caption, style=wx.OK|wx.ICON_INFORMATION)
     dlg.ShowModal()
     dlg.Destroy()
   def ErrorCheck(self, ctrl):	# Return True for OK
@@ -1152,17 +1977,34 @@ class BaseWindow(wx.ScrolledWindow):
   def OnChange2(self, ctrl, value):
     # Careful: value is Unicode
     name = ctrl.quisk_data_name
-    fmt4 = local_conf.format4name[name][0:4]
+    try:
+      fmt4 = local_conf.format4name[name]
+    except:
+      if name[0:4] in ("lin_", "win_"):
+        fmt4 = local_conf.format4name[name[4:]]
+    fmt4 = fmt4[0:4]
     ok, x = self.EvalItem(value, fmt4)	# Only evaluates integer, number, boolean, text, rfile
     if ok:
       radio_dict = local_conf.GetRadioDict(self.radio_name)
-      radio_dict[name] = value
-      local_conf.settings_changed = True
+      if name in name2format and name2format[name][1] == value:
+        if name in radio_dict:
+          del radio_dict[name]
+          local_conf.settings_changed = True
+      else:
+        radio_dict[name] = value
+        local_conf.settings_changed = True
       # Immediate changes
       if self.radio_name == Settings[1]:	# changed for current radio
-        if name in ('hot_key_ptt_toggle', 'hot_key_ptt_if_hidden', 'keyupDelay', 'cwTone', 'pulse_audio_verbose_output'):
+        if name in ('hot_key_ptt_toggle', 'hot_key_ptt_if_hidden', 'keyupDelay', 'cwTone', 'pulse_audio_verbose_output',
+                    'start_cw_delay', 'start_ssb_delay', 'maximum_tx_secs', 'quisk_serial_cts', 'quisk_serial_dsr',
+                    'hot_key_ptt1', 'hot_key_ptt2', 'midi_ptt_toggle'):
           setattr(conf, name, x)
           application.ImmediateChange(name)
+        elif name[0:4] in ('lin_', 'win_'):
+          name = name[4:]
+          if name in ('quisk_serial_port', ):
+            setattr(conf, name, x)
+            application.ImmediateChange(name)
         elif name == "reverse_tx_sideband":
           setattr(conf, name, x)
           QS.set_tx_audio(reverse_tx_sideband=x)
@@ -1173,29 +2015,23 @@ class BaseWindow(wx.ScrolledWindow):
           setattr(conf, name, x)
           QS.set_sparams(digital_output_level=x)
         elif name[0:7] == 'hermes_':
-          if name == 'hermes_lowpwr_tr_enable':
-            application.Hardware.SetLowPwrEnable(x)
-          elif name == 'hermes_power_amp':
-            application.Hardware.EnablePowerAmp(x)
-          elif name == 'hermes_TxLNA_dB':
+          if name == 'hermes_TxLNA_dB':
             application.Hardware.ChangeTxLNA(x)
           elif name == "hermes_bias_adjust" and self.HermesBias0:
             self.HermesBias0.Enable(x)
             self.HermesBias1.Enable(x)
             self.HermesWriteBiasButton.Enable(x)
             application.Hardware.EnableBiasChange(x)
-          elif name == "hermes_disable_sync":
-            application.Hardware.DisableSyncFreq(x)
           elif hasattr(application.Hardware, "ImmediateChange"):
             setattr(conf, name, x)
             application.Hardware.ImmediateChange(name)
   def FormatOK(self, value, fmt4):		# Check formats integer, number, boolean
     ok, v = self.EvalItem(value, fmt4)
     return ok
-  def EvalItem(self, value, fmt4):		# Return Python integer, number, boolean, text
+  def EvalItem(self, value, fmt4):		# Return Python integer, number, boolean, text, rfile, keycode
     # return is (item_is_ok, evaluated_item)
-    if fmt4 not in ('inte', 'numb', 'bool'):	# only certain formats are evaluated
-      return True, value
+    if fmt4 not in ('inte', 'numb', 'bool', 'keyc'):	# only certain formats are evaluated
+      return True, value	# text, rfile are returned by default
     jj = value.find('#')
     if jj > 0:
       value = value[0:jj]
@@ -1209,9 +2045,16 @@ class BaseWindow(wx.ScrolledWindow):
           v = True
         else:
           v = False
+      elif fmt4 == 'keyc':	# key code
+        if value == "None":
+          v = None
+        else:
+          v = eval(value)
+          v = int(v)
       else:
         raise ValueError
     except:
+      #traceback.print_exc()
       dlg = wx.MessageDialog(None,
         "Can not set item with format %s to value %s" % (fmt4, value),
         'Change to item', wx.OK|wx.ICON_ERROR)
@@ -1244,6 +2087,327 @@ class BaseWindow(wx.ScrolledWindow):
       return ''
     else:
       return value
+
+class BaseWindow(wx.ScrolledCanvas, ControlMixin):
+  def __init__(self, parent):
+    wx.ScrolledCanvas.__init__(self, parent)
+    ControlMixin.__init__(self, parent)
+
+class ConfigConfig(BaseWindow):
+  def __init__(self, parent, width):
+    BaseWindow.__init__(self, parent)
+    self.width = width
+    self.SetBackgroundColour(parent.bg_color)
+    self.num_cols = 7
+    #self.MarkCols()
+    self.radio_name = None
+    # Choice (combo) box for decimation
+    lst = application.Hardware.VarDecimGetChoices()
+    if lst:
+      txt = application.Hardware.VarDecimGetLabel()
+      index = application.Hardware.VarDecimGetIndex()
+    else:
+      txt = "Variable decimation"
+      lst = ["None"]
+      index = 0
+    help_text = "If your hardware supports different sample rates, choose one here. For SoftRock, \
+change the sample rate of your sound card."
+    txt, cb, btn = self.AddTextComboHelp(1, txt, lst[index], lst, help_text, True)
+    if lst:
+      cb.handler = application.OnBtnDecimation
+    self.btn_decimation = cb
+    self.NextRow()
+    self.NextRow()
+    help_text = "SoftRock and other radios that use a sound card for Rx and Tx will need small corrections \
+to the amplitude and phase. Click here for an adjustment screen."
+    txt, btn = self.AddTextButtonHelp(1, "Adjust receive amplitude and phase", "Rx Phase..", self.OnBtnPhase, help_text)
+    self.rx_phase = btn
+    if not conf.name_of_sound_capt:
+      btn.Enable(0)
+    self.NextRow()
+    txt, btn = self.AddTextButtonHelp(1, "Adjust transmit amplitude and phase", "Tx Phase..", self.OnBtnPhase, help_text)
+    self.tx_phase = btn
+    if not conf.name_of_mic_play:
+      btn.Enable(0)
+    self.NextRow()
+    help_text = "There is a color bar under the X-axis showing the band plan. Click here for a screen to change the colors."
+    txt, btn = self.AddTextButtonHelp(1, "Colors on X-axis for CW, Phone", "Band plan..", self.OnBtnBandPlan, help_text)
+    self.NextRow()
+    help_text = "Click here to configure the link to WSJT-X."
+    txt, btn = self.AddTextButtonHelp(1, "Configure WSJT-X", "WSJT-X..", self.OnConfigureWsjtx, help_text)
+    self.NextRow()
+    lst = ("Never", "Main Rx0 on startup", "Main Rx0 now")
+    value = application.local_conf.globals.get("start_wsjtx", "Never")
+    txt, cb, btn = self.AddTextComboHelp(1, "Start WSJT-X", value, lst, help_text, True)
+    cb.handler = application.OnStartWsjtx
+    self.NextRow()
+    help_text = "This controls the Tx level for non-digital modes. It is usually 100%."
+    c1, btn = self.AddTextSliderHelp(1, "Tx level %d%%  ", 100, 0, 100, self.OnTxLevel, help_text, span=2)
+    self.NextRow()
+    level = conf.digital_tx_level
+    help_text = "This controls the TX level for digital modes. Digital modes require greater linearity, and the digital level is often 25%."
+    c2, btn = self.AddTextSliderHelp(1, "Digital Tx level %d%%  ", level, 0, level, self.OnDigitalTxLevel, help_text, span=2)
+    if not hasattr(application.Hardware, "SetTxLevel"):
+      c1.slider.Enable(0)
+      c2.slider.Enable(0)
+    self.NextRow()
+    #### Make controls SECOND column
+    self.row = 3
+    self.AddTextL(4, "Configuration for the file record button:  " + conf.Xbtn_text_file_rec, span=2)
+    self.NextRow()
+    # File for recording speaker audio
+    text = "Record Rx audio to WAV files 1, 2, ... "
+    path = application.file_name_rec_audio
+    help_text = 'These check buttons control what happens when you press the "File Record" button. \
+Please choose a directory for your recordings; perhaps the "Music" directory on your computer. \
+Then choose your file name. This "Record Rx audio" file is used for recording the radio speaker sound. \
+Recording stops when the button is released. When pressed again new files are created with names 001, 002, etc. \
+You will need to delete recordings you no longer need.'
+    self.file_button_rec_speaker = self.MakeFileButton(text, path, 0, 'rec_audio', help_text)
+    # File for recording samples
+    text = "Record I/Q samples to WAV files 1, 2, ... "
+    path = application.file_name_rec_samples
+    help_text = 'This file is used to record the I/Q samples and it works like the "Record Rx audio" button.'
+    self.file_button_rec_iq = self.MakeFileButton(text, path, 1, 'rec_samples', help_text)
+    # File for recording the microphone
+    text = "Record the mic to make a CQ message"
+    path = application.file_name_rec_mic
+    help_text = 'This file is used to record the microphone. It can be used to record a CQ message that can be played \
+over and over until someone answers. Change the "Play audio" to the same file to test the recording. Keep recording and \
+playing until you are satisfied, and then un-check the "Record mic" button. The file is replaced when the Record button \
+is pressed again (no 001, 002, ...).'
+    self.file_button_rec_mic = self.MakeFileButton(text, path, 2, 'rec_mic', help_text)
+    ## Play buttons
+    self.AddTextL(4, "Configuration for the file play button:  " + conf.Xbtn_text_file_play, span=2)
+    self.NextRow()
+    # File for playing speaker audio
+    text = "Play audio from a WAV file"
+    path = application.file_name_play_audio
+    help_text = 'These record check buttons control what happens when you press the "File Play" button. \
+This button plays normal audio files, not samples.'
+    self.file_button_play_speaker = self.MakeFileButton(text, path, 10, 'play_audio', help_text)
+    # file for playing samples
+    text = "Receive saved I/Q samples from a file"
+    path = application.file_name_play_samples
+    help_text = 'This button plays I/Q samples. You can tune in different stations from the I/Q recording.'
+    self.file_button_play_iq = self.MakeFileButton(text, path, 11, 'play_samples', help_text)
+    # File for playing a file to the mic input for a CQ message
+    text = "Repeat a CQ message until a station answers"
+    path = application.file_name_play_cq
+    help_text = "This button enables the File Play button to start playing your CQ message."
+    self.file_button_play_mic = self.MakeFileButton(text, path, 12, 'play_cq', help_text)
+    # CQ repeat time
+    help_text = 'This is the amount of time to wait for someone to respond to your CQ message. \
+The CW message will then repeat. A time of zero means no repeat.'
+    sl, btn = self.AddTextSliderHelp(4, "    Repeat secs %.1f  ", 0, 0, 100, self.OnPlayFileRepeat, help_text, span=2, scale=0.1)
+    self.NextRow()
+    self.FitInside()
+    self.SetScrollRate(1, 1)
+  def MakeFileButton(self, text, path, index, name, help_text):
+    if index < 10:	# record buttons
+      cb = self.AddCheckBox(4, text, self.OnCheckRecPlay)
+    elif index == 10:
+      cb = self.AddRadioButton(4, text, self.OnCheckRecPlay, start=True)
+    else:
+      cb = self.AddRadioButton(4, text, self.OnCheckRecPlay, start=False)
+    txt, b = self.AddTextButtonHelp(5, '', "File..", self.OnBtnFileName, help_text)
+    b.check_box = cb
+    b.index = cb.index = index
+    b.path = cb.path = path
+    b.name = 'file_name_' + name
+    if index < 10:	# record buttons
+      if path:
+        enable = True
+        if index == 0:	# check record audio if there is a path
+          cb.SetValue(True)
+      else:
+        enable = False
+    else:		# playback buttons
+      enable = os.path.isfile(path)
+    cb.Enable(enable)
+    self.NextRow()
+    return b
+  def OnTxLevel(self, event):
+    application.tx_level = event.GetEventObject().GetValue()
+    application.Hardware.SetTxLevel()
+  def OnDigitalTxLevel(self, event):
+    application.digital_tx_level = event.GetEventObject().GetValue()
+    application.Hardware.SetTxLevel()
+  def OnBtnPhase(self, event):
+    btn = event.GetEventObject()
+    if btn.GetLabel()[0:2] == 'Tx':
+      rx_tx = 'tx'
+    else:
+      rx_tx = 'rx'
+    application.screenBtnGroup.SetLabel('Graph', do_cmd=True)
+    if application.w_phase:
+      application.w_phase.Raise()
+    else:
+      application.w_phase = QAdjustPhase(self, self.width, rx_tx)
+  def OnBtnFileName(self, event):
+    btn = event.GetEventObject()
+    dr, fn = os.path.split(btn.path)
+    if btn.index in (0, 1):	# record audio or samples
+      dlg = wx.FileDialog(self, 'Choose WAV file', dr, fn, style=wx.FD_SAVE, wildcard="Wave files (*.wav)|*.wav")
+    elif btn.index == 2:	# record mic
+      dlg = wx.FileDialog(self, 'Choose WAV file', dr, fn, style=wx.FD_SAVE|wx.FD_OVERWRITE_PROMPT, wildcard="Wave files (*.wav)|*.wav")
+    else:	# play buttons
+      dlg = wx.FileDialog(self, 'Choose WAV file', dr, fn, style=wx.FD_OPEN, wildcard="Wave files (*.wav)|*.wav")
+    if dlg.ShowModal() == wx.ID_OK:
+      path = dlg.GetPath()
+      if path[-4:].lower() != '.wav':
+        path = path + '.wav'
+      btn.path = path
+      setattr(application, btn.name, path)
+      btn.check_box.path = path
+      btn.check_box.Enable(True)
+      if btn.index >= 10:	# play buttons
+        btn.check_box.SetValue(True)
+        application.file_play_source = btn.index
+      self.EnableRecPlay()
+    dlg.Destroy()
+  def ChangePlayFile(self, btn, path):
+      btn.path = path
+      setattr(application, btn.name, path)
+      btn.check_box.path = path
+      btn.check_box.Enable(True)
+      self.EnableRecPlay()
+  def OnBtnBandPlan(self, ctrl):
+    from configure import BandPlanDlg
+    dlg = BandPlanDlg(self)
+    dlg.ShowModal()
+    dlg.Destroy()
+  def OnConfigureWsjtx(self, ctrl):
+    from configure import WsjtxDlg
+    dlg = WsjtxDlg(self)
+    dlg.ShowModal()
+    dlg.Destroy()
+  def InitRecPlay(self):
+    for btn in (self.file_button_play_speaker, self.file_button_play_iq, self.file_button_play_mic):
+      if btn.index == application.file_play_source:
+        btn.check_box.SetValue(True)
+  def EnableRecPlay(self):	# Enable or disable file record/play buttons on main screen
+    enable_rec = False
+    enable_play = False
+    for btn in (self.file_button_rec_speaker, self.file_button_rec_iq, self.file_button_rec_mic):
+      if btn.check_box.GetValue():
+        enable_rec = True
+        break
+    for btn in (self.file_button_play_speaker, self.file_button_play_iq, self.file_button_play_mic):
+       if btn.check_box.GetValue() and os.path.isfile(btn.path):
+         enable_play = True
+         break
+    application.btn_file_record.Enable(enable_rec)
+    application.btnFilePlay.Enable(enable_play)
+  def OnCheckRecPlay(self, event):
+    btn = event.GetEventObject()
+    if btn.GetValue():
+      if btn.index >= 10:	# play button
+        application.file_play_source = btn.index
+    self.EnableRecPlay()
+  def OnPlayFileRepeat(self, event):
+    application.file_play_repeat = event.GetEventObject().GetValue() * 0.1
+  def OnFilePlayButton(self, play):
+    if play:
+      for btn in (self.file_button_play_speaker, self.file_button_play_iq, self.file_button_play_mic):
+         if application.file_play_source == btn.index and btn.check_box.GetValue() and os.path.isfile(btn.path):
+           QS.open_wav_file_play(btn.path)
+           break
+    else:
+      QS.set_file_name(play_button=0)	# Close all play files
+  def OnFileRecordButton(self, record):	# The File Record button on the main screen
+    if record:
+      for btn in (self.file_button_rec_speaker, self.file_button_rec_iq, self.file_button_rec_mic):
+        if btn.check_box.GetValue():	# open this file
+          if btn.index in (0, 1) and os.path.isfile(btn.path):	# Change path
+            direc, fname = os.path.split(btn.path)
+            base = os.path.splitext(fname)[0]
+            while base and base[-1] in '0123456789':
+              base = base[0:-1]
+            if not base:
+              base = "rec"
+            index = 0
+            for dir_entry in os.scandir(direc):
+              if dir_entry.is_file():
+                name = dir_entry.name
+                if len(name) > 4 and name[-4] == '.' and name.startswith(base):
+                  ma = re.match(base + '([0-9]+)[.]', name)
+                  if ma:
+                    index = max(index, int(ma.group(1), base=10))
+            btn.path = os.path.join(direc, "%s%03d.wav" % (base, index + 1))
+          QS.set_file_name(btn.index, btn.path, record_button=1)
+          if btn.index == 0:	# Change play files to equal record files
+            self.ChangePlayFile(self.file_button_play_speaker, btn.path)
+          elif btn.index == 1:
+            self.ChangePlayFile(self.file_button_play_iq, btn.path)
+    else:
+      QS.set_file_name(record_button=0)		# Close all record files
+
+class ConfigTxAudio(BaseWindow):
+  def __init__(self, parent):
+    BaseWindow.__init__(self, parent)
+    self.tmp_playing = False
+    self.timer = wx.Timer(self)
+    self.Bind(wx.EVT_TIMER, self.OnTimer)
+    self.SetBackgroundColour(parent.bg_color)
+    self.num_cols = 4
+    #self.MarkCols()
+    self.NextRow()
+    t = "This is a test screen for transmit audio.  SSB, AM and FM have separate settings."
+    item = self.AddTextL(1, t, span=2)
+    self.NextRow()
+    self.NextRow()
+    self.NextRow()
+    help_text = "Record the transmit audio while adjusting clip and preemphasis; then play back the result."
+    txt, self.btn_record, self.btn_playback = self.AddText2CheckHelp(1, "Record transmit audio" + ' ' * 10,
+            "Record", self.OnBtnRecord, "Playback", self.OnBtnPlayback, help_text)
+    self.btn_playback.Enable(0)
+    if not conf.microphone_name:
+      self.btn_record.Enable(0)
+    self.NextRow()
+    help_text = "Audio level that triggers VOX (all modes)."
+    self.AddTextSliderHelp(1, "VOX level %d dB", application.levelVOX, -40, 0, application.OnLevelVOX, help_text, span=2)
+    self.NextRow()
+    help_text = "Time to hold VOX after end of audio in seconds."
+    self.AddTextSliderHelp(1, "VOX hold %0.2f secs", application.timeVOX, 0, 4000, application.OnTimeVOX, help_text, span=2, scale=0.001)
+    self.NextRow()
+    help_text = "Tx audio clipping level in dB for this mode."
+    sld, btn = self.AddTextSliderHelp(1, "Clip level %2d dB", 0, 0, 20, application.OnTxAudioClip, help_text, span=2)
+    application.CtrlTxAudioClip = sld
+    self.NextRow()
+    help_text = "Tx audio preemphasis of high frequencies."
+    sld, btn = self.AddTextSliderHelp(1, "Preemphasis %4.2f", 0, 0, 100, application.OnTxAudioPreemph, help_text, span=2, scale=0.01)
+    application.CtrlTxAudioPreemph = sld
+    self.NextRow()
+    self.FitInside()
+    self.SetScrollRate(1, 1)
+  def OnTimer(self, event):
+    if not self.tmp_playing:
+      self.timer.Stop()
+    elif QS.set_record_state(-1):	# poll to see if playback is finished
+      self.tmp_playing = False
+      self.timer.Stop()
+      self.btn_playback.SetValue(False)
+      self.btn_record.Enable(1)
+  def OnBtnRecord(self, event):
+    if event.GetEventObject().GetValue():
+      QS.set_kill_audio(1)
+      self.btn_playback.Enable(0)
+      QS.set_record_state(4)
+    else:
+      QS.set_kill_audio(0)
+      self.btn_playback.Enable(1)
+      QS.set_record_state(1)
+  def OnBtnPlayback(self, event):
+    if event.GetEventObject().GetValue():
+      self.btn_record.Enable(0)
+      QS.set_record_state(2)
+      self.tmp_playing = True
+      self.timer.Start(milliseconds=200)
+    else:
+      self.btn_record.Enable(1)
+      QS.set_record_state(3)
+      self.tmp_playing = False
 
 class Radios(BaseWindow):	# The "Radios" first-level page
   def __init__(self, parent):
@@ -1370,26 +2534,42 @@ class Radios(BaseWindow):	# The "Radios" first-level page
     self.start_radio.SetSelection(index)
 
 class RadioSection(BaseWindow):		# The pages for each section in the second-level notebook for each radio
-  help_cw = "If you turn on the Quisk internal sidetone, be sure to use Fast Sound. And for Linux, use Alsa for the radio sound output."\
-  " Reduce the hardware poll time for faster response."\
-  " If you don't have a key directly connected to your hardware, enter a serial port name and either CTS or DSR for the key."\
-  " Other options for remote keying will be available in the future."
+  help_cw = \
+  'If your CW key is not connected to your radio hardware, you can connect the key to Quisk using a serial port or MIDI. '\
+  'For the serial port, enter the serial port name and either CTS or DSR for the key. '\
+  'You can use MIDI for keying. See the "Keys" screen . '\
+  'If you turn on the Quisk internal sidetone, be sure to use the Fast Sound setting for Windows. '\
+  'And for Linux, use Alsa for the radio sound output. '\
+  'Reduce the hardware poll time for faster response.'
   def __init__(self, parent, radio_name, section, names):
     BaseWindow.__init__(self, parent)
     self.radio_name = radio_name
+    self.section = section
     self.names = names
-    self.controls_done = False
+    self.MakeControls()
   def MakeControls(self):
-    if self.controls_done:
-      return
-    self.controls_done = True
     self.num_cols = 8
     #self.MarkCols()
     self.NextRow(3)
-    col = 1
+    Keys = self.section == "Keys"
+    if Keys:
+      col = 5
+    else:
+      col = 1
+    start_row = self.row
     radio_dict = local_conf.GetRadioDict(self.radio_name)
+    radio_type = radio_dict['hardware_file_type']
     for name, text, fmt, help_text, values in self.names:
-      if name == 'favorites_file_path':
+      if name == 'remote_radio_password':
+        self.AddTextButtonHelp(col, text, "Change", self.OnChangePassword, help_text)
+        if col == 1:
+          col = 4
+        else:
+          col = 1
+          self.NextRow()
+      elif name == 'remote_radio_ip' and radio_type != "Control Head":
+        continue
+      elif name == 'favorites_file_path':
         self.favorites_path = radio_dict.get('favorites_file_path', '')
         row = self.row
         self.row = 1
@@ -1399,6 +2579,10 @@ class RadioSection(BaseWindow):		# The pages for each section in the second-leve
         self.row = row
       else:
         if name == "keyupDelay":
+          if col != 1:
+            col = 1
+            self.NextRow()
+          self.NextRow()
           self.NextRow()
           self.AddTextCHelp(1, "CW Settings for Remote and Local Operation", self.help_cw, 8)
           col = 1
@@ -1413,24 +2597,81 @@ class RadioSection(BaseWindow):		# The pages for each section in the second-leve
         value = self.GetValue(name, radio_dict)
         no_edit = "choice" in fmt or fmt == 'boolean'
         if name == "midi_cwkey_device":
+          # Start of MIDI
           values = QS.control_midi(get_in_names=1)
           values.insert(0, '')
         txt, cb, btn = self.AddTextComboHelp(col, text, value, values, help_text, no_edit)
         cb.handler = self.OnChange
         cb.quisk_data_name = name
-        #if name == "quisk_debug_sound":
-        #  cb.err_check = self.ErrorCheck
-        if col == 1:
+        if Keys:
+          self.NextRow()
+        elif col == 1:
           col = 4
         else:
           col = 1
           self.NextRow()
-    self.AddColSpacer(2, 20)
-    self.AddColSpacer(5, 20)
+    if self.section == "Keys":
+      if self.radio_name == Settings[1]:	# Current radio in use
+        application.config_midi_window = self
+      charx = self.charx
+      self.list_ctrl = list_ctrl = wx.ListCtrl(self, size=(charx * 19 + 5, self.quisk_height * 8),
+                     style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_SIMPLE)
+      list_ctrl.InsertColumn(0, 'Midi', width=charx*10)
+      list_ctrl.InsertColumn(1, 'Quisk', width=charx*9)
+      list_ctrl.SetBackgroundColour(wx.Colour(0xeaeaea))
+      list_ctrl.Bind(wx.EVT_LIST_ITEM_SELECTED, self.OnMidiListSelected)
+      index = 0
+      for txt_note in local_conf.MidiNoteDict:		# txt_note is a string
+        int_note = int(txt_note, base=0)
+        self.list_ctrl.InsertItem(index, txt_note)
+        self.list_ctrl.SetItemData(index, int_note)
+        self.list_ctrl.SetItem(index, 1, local_conf.MidiNoteDict[txt_note])
+        index += 1
+      list_ctrl.SortItems(lambda x, y: x - y)
+      rows = self.row - start_row + 1
+      self.row = start_row
+      self.gbs.Add(list_ctrl, (start_row, 1), span=(rows, 1), flag=wx.RIGHT, border=charx * 15 // 10)
+      #self.gbs.Add (charx, self.chary // 2, wx.GBPosition(start_row + rows, 1))	# Spacer at the bottom
+      hlp = \
+      'You can use a MIDI keyboard or other MIDI device to control Quisk. '\
+      'These Midi devices generate a control number and value for buttons, knobs and jog wheels. '\
+      'You can assign the number to a Quisk button or slider. '\
+      'Operate the control and look here to see the note or control number received by Quisk. '\
+      'Then press a button below to assign the control.'
+      txt, self.midi_edt, btn = self.AddTextEditHelp(2, "Midi control", '', hlp, border=2, span1=1, span2=1, no_edit=True)
+      self.NextRow()
+      hlp = 'Assign the Midi button to a Quisk button.'
+      ctrl = self.AddPopupMenuHelp(MidiButton, 2, "Assign Midi control to", "Button", hlp)
+      ctrl.handler = self.OnMidiMenu
+      self.NextRow()
+      hlp = \
+      'A "knob" is a Midi control that rotates left and right one turn. It sends a value from 0 to 127. '\
+      'Assign the Midi knob to a Quisk control.'
+      ctrl = self.AddPopupMenuHelp(MidiKnob, 2, "Assign Midi control to", "Knob", hlp)
+      ctrl.handler = self.OnMidiMenu
+      self.NextRow()
+      hlp = \
+      'A "jog wheel" is a Midi control that rotates around and around. It sends continuous high or low values. '\
+      'Assign the Midi jog wheel to a Quisk control.'
+      self.midiJogWheel = self.AddPopupMenuHelp(MidiJogWheel, 2, "Assign Midi control to", "Jog Wheel", hlp)
+      self.midiJogWheel.handler = self.OnMidiMenu
+      self.NextRow()
+      hlp = "To delete a row, select it and press this button."
+      self.AddTextButtonHelp(2, "Delete Midi row", "Delete", self.OnMidiDelete, hlp)
+      self.NextRow()
+    if self.section == "Timing and CW":
+      if col != 1:
+        col = 1
+        self.NextRow()
+      self.NextRow()
+      self.AddTextL(1, 'Midi CW key moved to "Keys"', span=4)
+    if not Keys:
+      self.AddColSpacer(2, 20)
+      self.AddColSpacer(5, 20)
     self.FitInside()
     self.SetScrollRate(1, 1)
   def OnButtonChangeFavorites(self, event):
-    if isinstance(event, ComboCtrl):
+    if isinstance(event, (ChoiceCombo, ComboCtrl)):
       path = event.GetValue()
     else:
       direc, fname = os.path.split(getattr(conf, 'favorites_file_in_use'))
@@ -1446,6 +2687,90 @@ class RadioSection(BaseWindow):		# The pages for each section in the second-leve
     self.favorites_path = path
     local_conf.GetRadioDict(self.radio_name)["favorites_file_path"] = path
     local_conf.settings_changed = True
+  def OnMidiDelete(self, event):
+    ctrl = self.list_ctrl
+    index = ctrl.GetFirstSelected()
+    if index < 0:
+      return
+    txt_note = ctrl.GetItem(index, 0).GetText()
+    ctrl.DeleteItem(index)
+    del local_conf.MidiNoteDict[txt_note]
+    local_conf.settings_changed = True
+    if index > 0:
+      index -= 1
+    if ctrl.GetItemCount() > 0:
+      ctrl.Select(index)
+      ctrl.EnsureVisible(index)
+  def MidiAddNote(self):
+    note = self.midi_edt.GetValue()
+    self.midi_edt.Clear()
+    if not note:
+      return -1
+    txt_note = note.split()[0]
+    if txt_note[2] == '8':
+      txt_note = "0x9%s" % txt_note[3:]		# Change Note Off to store as Note On
+    int_note = int(txt_note, base=0)
+    ctrl = self.list_ctrl
+    index = ctrl.FindItem(-1, txt_note)
+    if index < 0:	# Item is not in the list. Add it.
+      ctrl.Append((txt_note, ''))
+      ctrl.SetItemData(ctrl.GetItemCount() - 1, int_note)
+      ctrl.SortItems(lambda x, y: x-y)
+      index = ctrl.FindItem(-1, txt_note)
+      local_conf.MidiNoteDict[txt_note] = ''
+      local_conf.settings_changed = True
+    if index >= 0:
+      ctrl.Select(index)
+      ctrl.EnsureVisible(index)
+    return index
+  def OnMidiMenu(self, ctrl, jog_tag=None):
+    if jog_tag:		# Change the jog tag on the current line
+      index = self.list_ctrl.GetFirstSelected()
+      if index < 0:
+        return
+      text = self.list_ctrl.GetItem(index, 1).GetText()
+      if len(text) > 3 and text[-3] == ' ' and text[-2] in "+-" and text[-1] in '0123456789':	# Item is a jog wheel item
+        text = text[0:-2] + jog_tag
+      else:	# There is no jog tag on the current item
+        return
+    else:	# Assign the Midi message to a Quisk control
+      index = self.MidiAddNote()
+      if index < 0:
+        return
+      text = ctrl.value
+    self.list_ctrl.SetItem(index, 1, text)
+    txt_note = self.list_ctrl.GetItem(index, 0).GetText()
+    local_conf.MidiNoteDict[txt_note] = text
+    local_conf.settings_changed = True
+  def OnMidiListSelected(self, event):
+    event.Skip()
+    self.midi_edt.Clear()
+    index = self.list_ctrl.GetFirstSelected()
+    text = self.list_ctrl.GetItem(index, 1).GetText()
+    if len(text) > 3 and text[-3] == ' ' and text[-2] in "+-" and text[-1] in '0123456789':	# Item is a jog wheel item
+      self.midiJogWheel.ChangeSelection(text[-2:])
+  def OnNewMidiNote(self, message):
+    txt_note = "0x%02X%02X %d" % tuple(message)
+    self.midi_edt.SetValue(txt_note)
+    if txt_note[2] == '8':	# Note off. We already saw the Note On message.
+      return
+    txt_note = txt_note.split()[0]
+    index = self.list_ctrl.FindItem(-1, txt_note)
+    if index >= 0:
+      self.list_ctrl.Select(index)
+      self.list_ctrl.EnsureVisible(index)
+    else:
+      index = self.list_ctrl.GetFirstSelected()
+      if index >= 0:
+        self.list_ctrl.Select(index, 0)
+  def OnChangePassword(self, event):
+    text = local_conf.globals.get('remote_radio_password', '')
+    dlg = wx.TextEntryDialog(self, "Please enter a password for remote access",
+          "Password Entry", text)
+    if dlg.ShowModal() == wx.ID_OK:
+      local_conf.globals["remote_radio_password"] = dlg.GetValue()
+      local_conf.settings_changed = True
+      local_conf.SaveState()
 
 class RadioHardwareBase(BaseWindow):		# The Hardware page in the second-level notebook for each radio
   def __init__(self, parent, radio_name):
@@ -1479,7 +2804,7 @@ class RadioHardwareBase(BaseWindow):		# The Hardware page in the second-level no
     self.AddColSpacer(5, 20)
     self.SetScrollRate(1, 1)
   def OnButtonChangeHardware(self, event):
-    if isinstance(event, ComboCtrl):
+    if isinstance(event, (ChoiceCombo, ComboCtrl)):
       path = event.GetValue()
     else:
       direc, fname = os.path.split(self.hware_path)
@@ -1496,7 +2821,7 @@ class RadioHardwareBase(BaseWindow):		# The Hardware page in the second-level no
     local_conf.GetRadioDict(self.radio_name)["hardware_file_name"] = path
     local_conf.settings_changed = True
   def OnButtonChangeWidgets(self, event):
-    if isinstance(event, ComboCtrl):
+    if isinstance(event, (ChoiceCombo, ComboCtrl)):
       path = event.GetValue()
     else:
       direc, fname = os.path.split(self.widgets_path)
@@ -1540,7 +2865,7 @@ class RadioHardware(RadioHardwareBase):		# The Hardware page in the second-level
         pass
       elif name[0:4] == platform_ignore:
         pass
-      elif name in ('Hermes_BandDictEnTx', 'AlexHPF_TxEn', 'AlexLPF_TxEn'):
+      elif name in ('Hermes_BandDictEnTx', ):
         pass
       elif 'Hl2_' in name and hermes_board_id != 6:
         pass
@@ -1587,6 +2912,7 @@ class RadioHardware(RadioHardwareBase):		# The Hardware page in the second-level
       self.HermesWriteBiasButton = self.AddPushButton(7, "Write", self.OnButtonHermesWriteBias, border=0)
       self.HermesWriteBiasButton.Enable(enbl)
     self.FitInside()
+    self.SetScrollRate(1, 1)
   def OnHermesChangeBias0(self, event):
     value = self.HermesBias0.GetValue()
     application.Hardware.ChangeBias0(value)
@@ -2047,24 +3373,47 @@ or "automatic" for automatic gain control. The "detailed" or "automatic" may not
 
 class RadioSound(BaseWindow):		# The Sound page in the second-level notebook for each radio
   """Configure the available sound devices."""
-  sound_names = (		# same order as grid labels
+  sound_names = (		# same order as label_help
     ('playback_rate', '', '', '', 'name_of_sound_play'),
     ('mic_sample_rate', 'mic_channel_I', 'mic_channel_Q', '', 'microphone_name'),
     ('sample_rate', 'channel_i', 'channel_q', 'channel_delay', 'name_of_sound_capt'),
     ('mic_playback_rate', 'mic_play_chan_I', 'mic_play_chan_Q', 'tx_channel_delay', 'name_of_mic_play'),
+    ('', '', '', '', 'sample_playback_name'),
     ('', '', '', '', 'digital_input_name'),
     ('', '', '', '', 'digital_output_name'),
-    ('', '', '', '', 'sample_playback_name'),
     ('', '', '', '', 'digital_rx1_name'),
+    ('', '', '', '', 'digital_rx2_name'),
+    ('', '', '', '', 'digital_rx3_name'),
+    ('', '', '', '', 'digital_rx4_name'),
+    ('', '', '', '', 'digital_rx5_name'),
+    ('', '', '', '', 'digital_rx6_name'),
+    ('', '', '', '', 'digital_rx7_name'),
+    ('', '', '', '', 'digital_rx8_name'),
+    ('', '', '', '', 'digital_rx9_name'),
+    )
+  label_help = (	# Same order as sound_names
+    (1, "Radio Sound Output",   "This is the radio sound going to the headphones or speakers."),
+    (0, "Microphone Input",     "This is the monophonic microphone source.  Set the channel if the source is stereo."),
+    (0, "I/Q Rx Sample Input",  "This is the sample source if it comes from a sound device, such as a SoftRock."),
+    (1, "I/Q Tx Sample Output", "This is the transmit sample audio sent to a SoftRock."),
+    (1, "Raw Digital Output",   "This sends the received I/Q data to another program as stereo."),
+    (0, "Digital Tx0 Input",    "This is the transmit audio coming from a digital mode program."),
+    (1, "Digital Rx0 Output",   "This is the main receiver Rx0 audio going to a digital mode program."),
+    (1, "Digital Rx1 Output",   "This is the sub-receiver 1 audio going to a digital mode program."),
+    (1, "Digital Rx2 Output",   "This is the sub-receiver 2 audio going to a digital mode program."),
+    (1, "Digital Rx3 Output",   "This is the sub-receiver 3 audio going to a digital mode program."),
+    (1, "Digital Rx4 Output",   "This is the sub-receiver 4 audio going to a digital mode program."),
+    (1, "Digital Rx5 Output",   "This is the sub-receiver 5 audio going to a digital mode program."),
+    (1, "Digital Rx6 Output",   "This is the sub-receiver 6 audio going to a digital mode program."),
+    (1, "Digital Rx7 Output",   "This is the sub-receiver 7 audio going to a digital mode program."),
+    (1, "Digital Rx8 Output",   "This is the sub-receiver 8 audio going to a digital mode program."),
+    (1, "Digital Rx9 Output",   "This is the sub-receiver 9 audio going to a digital mode program."),
     )
   def __init__(self, parent, radio_name):
     BaseWindow.__init__(self, parent)
     self.radio_name = radio_name
-    self.controls_done = False
+    self.MakeControls()
   def MakeControls(self):
-    if self.controls_done:
-      return
-    self.controls_done = True
     self.radio_dict = local_conf.GetRadioDict(self.radio_name)
     self.num_cols = 8
     for name, text, fmt, help_text, values in local_conf.GetSectionData('Sound'):
@@ -2098,23 +3447,14 @@ class RadioSound(BaseWindow):		# The Sound page in the second-level notebook for
 "For Linux you can use the Alsa device, the PortAudio device or the PulseAudio device.  "
 "The Alsa device are recommended because they have lower latency.  See the documentation for more information.")
     self.NextRow()
-    label_help = (
-      (1, "Radio Sound Output", "This is the radio sound going to the headphones or speakers."),
-      (0, "Microphone Input", "This is the monophonic microphone source.  Set the channel if the source is stereo."),
-      (0, "I/Q Rx Sample Input", "This is the sample source if it comes from a sound device, such as a SoftRock."),
-      (1, "I/Q Tx Sample Output", "This is the transmit sample audio sent to a SoftRock."),
-      (0, "External Digital Input", "This is the loopback sound device for Rx samples received from a digital program such as FlDigi."),
-      (1, "External Digital Output", "This is the loopback sound device for Tx samples sent to a digital program such as FlDigi."),
-      (1, "Raw Digital Output", "This sends the received I/Q data to another program."),
-      (1, "Digital Rx1 Output", "This sends sub-receiver 1 output to another program."),
-    )
     choices = (("48000", "96000", "192000"), ("0", "1"), ("0", "1"), (" ", "0", "1"))
     r = 0
     if "SoftRock" in self.radio_dict['hardware_file_type']:		# Samples come from sound card
       softrock = True
     else:
       softrock = False
-    for is_output, label, helptxt in label_help:
+    last_row = 8
+    for is_output, label, helptxt in self.label_help:
       self.AddTextLHelp(1, label, helptxt)
       # Add col 0
       value = self.ItemValue(r, 0)
@@ -2137,16 +3477,7 @@ class RadioSound(BaseWindow):		# The Sound page in the second-level notebook for
         if r == 3:
           cb = self.AddComboCtrl(2, '', choices=("",), right=True)
           cb.Enable(False)
-      if r == 4:
-        cb = self.AddComboCtrl(2, "48000", choices=("48000",), right=True, no_edit=True)
-        cb.Enable(False)
-      if r == 5:
-        cb = self.AddComboCtrl(2, "48000", choices=("48000",), right=True, no_edit=True)
-        cb.Enable(False)
-      if r == 6:
-        cb = self.AddComboCtrl(2, "48000", choices=("48000",), right=True, no_edit=True)
-        cb.Enable(False)
-      if r == 7:
+      if r >= 4:
         cb = self.AddComboCtrl(2, "48000", choices=("48000",), right=True, no_edit=True)
         cb.Enable(False)
       cb.handler = self.OnChange
@@ -2166,13 +3497,25 @@ class RadioSound(BaseWindow):		# The Sound page in the second-level notebook for
       if not softrock and r in (2, 3):
         cb = self.AddComboCtrl(6, self.ItemValue(r, 4), choices=[''])
       elif is_output:
-        cb = self.AddComboCtrl(6, self.ItemValue(r, 4), choices=application.dev_play)
+        if label == "Digital Rx0 Output" and sys.platform != 'win32':
+          play_names = application.dev_play[:]
+          play_names += ["pulse: Use name QuiskDigitalOutput.monitor"]
+        else:
+          play_names = application.dev_play
+        cb = self.AddComboCtrl(6, self.ItemValue(r, 4), choices=play_names)
       else:
-        cb = self.AddComboCtrl(6, self.ItemValue(r, 4), choices=application.dev_capt)
+        if label == "Digital Tx0 Input" and sys.platform != 'win32':
+          capt_names = application.dev_capt[:]
+          capt_names += ["pulse: Use name QuiskDigitalInput"]
+        else:
+          capt_names = application.dev_capt
+        cb = self.AddComboCtrl(6, self.ItemValue(r, 4), choices=capt_names)
       cb.handler = self.OnChange
       cb.quisk_data_name = platform_accept + self.sound_names[r][4]
       self.NextRow()
       r += 1
+      if r >= last_row:
+        break
     self.gbs = gbs
     self.FitInside()
     self.SetScrollRate(1, 1)
@@ -2204,11 +3547,9 @@ class RadioBands(BaseWindow):		# The Bands page in the second-level notebook for
   def __init__(self, parent, radio_name):
     BaseWindow.__init__(self, parent)
     self.radio_name = radio_name
-    self.controls_done = False
+    self.parent = parent
+    self.MakeControls()
   def MakeControls(self):
-    if self.controls_done:
-      return
-    self.controls_done = True
     radio_dict = local_conf.GetRadioDict(self.radio_name)
     radio_type = radio_dict['hardware_file_type']
     self.num_cols = 8
@@ -2229,13 +3570,15 @@ class RadioBands(BaseWindow):		# The Bands page in the second-level notebook for
         band_labels[i] = band_labels[i][0]
     band_edge = radio_dict['BandEdge']
     # band_list is a list of all known bands
-    band_list = local_conf.originalBandEdge
-    band_list = list(band_list)
-    band_list.sort(key=self.SortCmp)
+    band_list = conf.BandList[:]
     band_list.append('Time')
-    if local_conf.ReceiverHasName(radio_type, 'tx_level'):
-      tx_level = self.GetValue('tx_level', radio_dict)
-      radio_dict['tx_level'] = tx_level     # Make sure the dictionary is in radio_dict
+    if local_conf.ReceiverHasName(radio_type, 'tx_level'):	# Must show and edit tx_level
+      if 'tx_level' in radio_dict:
+        tx_level = radio_dict['tx_level']
+      else:
+        tx_level = {}
+        radio_dict['tx_level'] = {}
+        local_conf.settings_changed = True
     else:
       tx_level = None
     try:
@@ -2355,17 +3698,30 @@ class RadioBands(BaseWindow):		# The Bands page in the second-level notebook for
         self.NextRow()
     # Add hermes_bus
     if hermes_bus is not None:
-      bus_text = 'The IO bus is used to select filters for each band.  Check the bit for a "1", and uncheck the bit for a "0".\
-  Bits are shown in binary number order.  For example, decimal 9 is 0b1001, so check bits 3 and 0.\
-  Changes are immediate (no need to restart).\
-  Refer to the documentation for your filter board to see which bits to set.\
-  The Rx bits are used for both receive and transmit, unless the "Enable" box is checked.\
-  Then you can specify different filters for Rx and Tx.\
-  If multiple receivers are in use, the Rx filter will be that of the highest frequency band.'
+      rx_bus_text = 'The IO bus is used to select filters for each band. Check the bit for a "1", and uncheck the bit for a "0".\
+ Bits are shown in binary number order. For example, decimal 9 is 0b1001, so check bits 3 and 0.\
+ Changes are immediate (no need to restart).\
+ Refer to the documentation for your filter board to see which bits to set. For the Hermes Lite 2 N2ADR filter set:\n\n\
+160:  0000001\n\
+80:    1000010\n\
+60:    1000100\n\
+40:    1000100\n\
+30:    1001000\n\
+20:    1001000\n\
+17:    1010000\n\
+15:    1010000\n\
+12:    1100000\n\
+10:    1100000\n\
+\n\
+If multiple receivers are in use, the Rx filter will be that of the highest frequency band.\
+ The Rx bits are sent as the "Alex" filters (Protocol 1, address 9) and are sent to the J16 interface.'
+      tx_bus_text = 'The Rx bits are used for both receive and transmit unless the "Enable" box is checked.\
+ Then you can specify different filters for Rx and Tx.\n\n\
+The Tx bits are sent as the "Alex" filters and are sent to the J16 interface.'
       col += 1
       self.row = heading_row
-      self.AddTextCHelp(col, " Rx IO Bus", bus_text)
-      self.AddTextCHelp(col + 1, " Tx IO Bus", bus_text)
+      self.AddTextCHelp(col, " Rx IO Bus", rx_bus_text)
+      self.AddTextCHelp(col + 1, " Tx IO Bus", tx_bus_text)
       self.row += 1
       self.AddTextC(col, "6...Bits...0")
       btn = self.AddCheckBox(col + 1, "  Enable", self.ChangeIOTxEnable, flag=wx.ALIGN_CENTER|wx.ALIGN_CENTER_VERTICAL)
@@ -2392,7 +3748,7 @@ class RadioBands(BaseWindow):		# The Bands page in the second-level notebook for
     self.FitInside()
     self.SetScrollRate(1, 1)
   def SortCmp(self, item1):
-    # Numerical conversion to  megahertz
+    # Numerical conversion of band name to  megahertz
     try:
       if item1[-2:] == 'cm':
         item1 = float(item1[0:-2]) * .01
@@ -2491,18 +3847,15 @@ class RadioBands(BaseWindow):		# The Bands page in the second-level notebook for
       radio_dict[name] = "False"
       setattr(conf, name, False)
     local_conf.settings_changed = True
-    if hasattr(application.Hardware, "ChangeBandFilters"):
-      application.Hardware.ChangeBandFilters()
+    if hasattr(application.Hardware, "ImmediateChange"):
+      application.Hardware.ImmediateChange(name)
 
-class RadioFilters(BaseWindow):		# The Filters page in the second-level notebook for each radio
+class xxRadioFilters(BaseWindow):		# The Filters page in the second-level notebook for each radio
   def __init__(self, parent, radio_name):
     BaseWindow.__init__(self, parent)
     self.radio_name = radio_name
-    self.controls_done = False
+    self.MakeControls()
   def MakeControls(self):
-    if self.controls_done:
-      return
-    self.controls_done = True
     radio_dict = local_conf.GetRadioDict(self.radio_name)
     self.num_cols = 8
     self.NextRow()
@@ -2579,8 +3932,6 @@ class RadioFilters(BaseWindow):		# The Filters page in the second-level notebook
     setattr(conf, name, filters)
     radio_dict[name] = filters
     local_conf.settings_changed = True
-    if hasattr(application.Hardware, "ChangeAlexFilters"):
-      application.Hardware.ChangeAlexFilters(edit=True)
   def ChangeBits(self, control):
     radio_dict = local_conf.GetRadioDict(self.radio_name)
     name = control.quisk_data_name
@@ -2589,8 +3940,6 @@ class RadioFilters(BaseWindow):		# The Filters page in the second-level notebook
     setattr(conf, name, filters)
     radio_dict[name] = filters
     local_conf.settings_changed = True
-    if hasattr(application.Hardware, "ChangeAlexFilters"):
-      application.Hardware.ChangeAlexFilters(edit=True)
   def ChangeEnable(self, event):
     btn = event.GetEventObject()
     name = btn.quisk_data_name
@@ -2602,5 +3951,322 @@ class RadioFilters(BaseWindow):		# The Filters page in the second-level notebook
       radio_dict[name] = "False"
       setattr(conf, name, False)
     local_conf.settings_changed = True
-    if hasattr(application.Hardware, "ChangeAlexFilters"):
-      application.Hardware.ChangeAlexFilters(edit=True)
+    
+class BandPlanDlg(wx.Dialog, ControlMixin):
+  # BandPlan in the application and the config file is a list of [integer hertz, color] and the color is None for "End".
+  # BandPlan in Settings[4] (global settings) is a list of [string freq in MHz, mode].
+  # BandPlanColors is always a list of [mode, color] and the mode "End" is not in the list.
+  # The color is a string "#aa88cc". The mode is a string "DxData", etc.
+  def __init__(self, parent):
+    txt = 'Color Bars on the Frequency X-axis Mark the Band Plan'
+    wx.Dialog.__init__(self, None, -1, txt, size=(-1, 100))
+    ControlMixin.__init__(self, parent)
+    bg_color = parent.GetBackgroundColour()
+    self.SetBackgroundColour(bg_color)
+    self.parent = parent
+    self.radio_name = "_Global_"
+    self.select_index = 0
+    if "BandPlanColors" in Settings[4] and "BandPlan" in Settings[4]:
+      colors = Settings[4]["BandPlanColors"]
+    else:
+      Get = conf.__dict__.get	# Get colors from the user's config file, if any.
+      dflt = "#555555"
+      colors = [
+        ['CW, General',		Get("CW",	dflt)],
+        ['CW, Extra',		Get("eCW",	dflt)],
+        ['Phone, General',	Get("Phone",	dflt)],
+        ['Phone, Extra',	Get("ePhone",	dflt)],
+        ['AM',			Get("AM",	dflt)],
+        ['Data',		Get("Data",	dflt)],
+        ['DxData',		Get("DxData",	dflt)],
+        ['RTTY',		Get("RTTY",	dflt)],
+        ['SSTV',		Get("SSTV",	dflt)],
+        ['Packet',		Get("Packet",	dflt)],
+        ['Beacons',		Get("Beacons",	dflt)],
+        ['Satellite',		Get("Satellite",dflt)],
+        ['Repeater out',	Get("Repeater",	dflt)],
+        ['Repeater in',		Get("RepInput",	dflt)],
+        ['Simplex',		Get("Simplex",	dflt)],
+        ['Rx only',		Get("RxOnly",	dflt)],
+        ['Special',		Get("Special",	dflt)],
+        ['Other',		Get("Other",	dflt)]
+      ]
+    self.modes = []
+    self.color_dict = {None:"End"}
+    self.mode_dict = {"End":None}
+    for mode, color in colors:
+      self.modes.append(mode)
+      self.color_dict[color] = mode
+      self.mode_dict[mode] = color
+    self.modes.append("End")
+    self.MakeControls()
+  def MakeControls(self):
+    self.num_cols = 7
+    #self.MarkCols()
+    self.BgColor1 = wx.Colour(0xf8f8f8)
+    self.BgColor2 = wx.Colour(0xe0e0e0)
+    charx = self.charx
+    chary = self.chary
+    self.gbs.Add (charx, chary // 2, wx.GBPosition(self.row, 6))	# Spacer at the right ends control expansion
+    start_row = self.row
+    self.list_ctrl = list_ctrl = wx.ListCtrl(self, size=(charx * 36, application.screen_height * 6 // 10),
+                     style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_SIMPLE | wx.LC_NO_HEADER)
+    list_ctrl.InsertColumn(0, '', width=charx*16)
+    list_ctrl.InsertColumn(1, '', width=charx*20)
+    list_ctrl.SetBackgroundColour(self.BgColor1)
+    list_ctrl.Bind(wx.EVT_LIST_ITEM_SELECTED, self.OnSelected)
+    hlp = '\
+The graph X-axis has colored bars to mark band segments; CW, phone etc. \
+Colors start at each frequency and continue until the next frequency or "End". \
+To add a row, enter the frequency that starts the segment. Then press the Enter key. \
+It is easier to add all the frequencies for a band first and then correct the modes later.'
+    txt, edt, btn = self.AddTextEditHelp(3, "New frequency MHz", "", hlp, no_edit=False, border=0)
+    self.Bind(wx.EVT_TEXT_ENTER, self.OnNewFreq, source=edt)
+    self.NextRow()
+    hlp = 'This changes the mode on the selected row. \
+The mode begins at the start frequency and ends at the next frequency.'
+    txt, self.ComboMode, btn = self.AddTextComboHelp(3, "Mode at start frequency", "AM", self.modes, hlp, no_edit=True, border=0)
+    self.ComboMode.handler = self.OnChangeMode
+    self.NextRow()
+    hlp = 'To delete a row, click the row and press this button.'
+    self.AddTextButtonHelp(3, "Delete frequency", "Delete", self.OnDelete, hlp, border=0)
+    self.NextRow()
+    hlp = 'Press "Save" to save your changes. Press "Cancel" to discard your changes.'
+    self.AddText2ButtonHelp(3, "Save changes", "Save", self.OnSave, "Cancel", self.OnCancel, hlp, border=0)
+    self.NextRow()
+    self.gbs.Add (charx, chary, wx.GBPosition(self.row, 3))	# Spacer before color table
+    self.NextRow()
+    width = 0
+    buttons = []
+    colors = []
+    for mode in self.modes:
+      if mode != "End":
+        colors.append(self.mode_dict[mode])
+        btn = QuiskPushbutton(self, self.OnColorButton, mode)
+        btn.SetColorGray()
+        buttons.append(btn)
+        width = max(width, btn.GetSize().Width)
+    h = self.quisk_height + 2
+    for btn in buttons:		# Make all buttons the same size
+      btn.SetSizeHints(width, h, width, h)
+    h = self.quisk_height
+    for i in range(0, len(buttons), 2):		# Must be an even number
+      btn1 = buttons[i]
+      btn2 = buttons[i + 1]
+      color1 = wx.StaticText(self, -1, '')
+      color1.SetSizeHints(h, h, -1, h)
+      color1.SetBackgroundColour(wx.Colour(colors[i]))
+      btn1.color_ctrl = color1
+      color2 = wx.StaticText(self, -1, '')
+      color2.SetSizeHints(h, h, -1, h)
+      color2.SetBackgroundColour(wx.Colour(colors[i + 1]))
+      btn2.color_ctrl = color2
+      bsizer = wx.BoxSizer(wx.HORIZONTAL)
+      bsizer.Add(btn1, proportion=0)
+      bsizer.Add(color1, proportion=1, border=3, flag=wx.ALIGN_CENTER_VERTICAL|wx.LEFT)
+      bsizer.Add(color2, proportion=1, border=3, flag=wx.ALIGN_CENTER_VERTICAL|wx.LEFT|wx.RIGHT)
+      bsizer.Add(btn2, proportion=0)
+      self.gbs.Add(bsizer, (self.row, 3), span=(1, 3), flag=wx.EXPAND)
+      self.NextRow()
+    self.NextRow()
+    self.gbs.Add(list_ctrl, (start_row, 1), span=(self.row, 1))
+    self.gbs.Add (charx, chary // 2, wx.GBPosition(start_row + self.row, 1))	# Spacer at the bottom
+    self.DrawPlan()
+    self.gbs.Fit(self)
+  def DrawPlan(self):
+    index = 0
+    sel = 0
+    if "BandPlanColors" in Settings[4] and "BandPlan" in Settings[4]:
+      for freq, mode in Settings[4]["BandPlan"]:
+        self.list_ctrl.InsertItem(index, freq)
+        self.list_ctrl.SetItem(index, 1, mode)
+        if freq == "3.500":
+          sel = index
+        index += 1
+    else:
+      for freq, color in conf.BandPlan:
+        mode = self.color_dict.get(color, "Other")
+        self.list_ctrl.InsertItem(index, FormatMHz(freq * 1E-6))
+        self.list_ctrl.SetItem(index, 1, mode)
+        if freq == 3500000:
+          sel = index
+        index += 1
+    self.MakeBackground()
+    self.list_ctrl.Select(sel)
+    self.list_ctrl.EnsureVisible(sel)
+  def OnSelected(self, event):
+    self.select_index = event.GetIndex()
+    mode = self.list_ctrl.GetItem(self.select_index, 1).GetText()
+    j = self.modes.index(mode)
+    self.ComboMode.SetSelection(j)
+  def OnChangeMode(self, ctrl):
+    self.list_ctrl.EnsureVisible(self.select_index)
+    mode = self.ComboMode.GetValue()
+    self.list_ctrl.SetItem(self.select_index, 1, mode)
+    self.MakeBackground()
+  def MakeBackground(self):
+    ctrl = self.list_ctrl
+    color = self.BgColor1
+    for index in range(ctrl.GetItemCount()):
+      mode = self.list_ctrl.GetItem(index, 1).GetText()
+      self.list_ctrl.SetItemBackgroundColour(index, color)
+      if mode == "End":
+        if color is self.BgColor1:
+          color = self.BgColor2
+        else:
+          color = self.BgColor1
+  def OnNewFreq(self, event):
+    freq = event.GetString()
+    win = event.GetEventObject()
+    win.Clear()
+    try:
+      freq = float(freq)
+      hertz = int(freq * 1E6 + 0.1)
+    except:
+      return
+    i1, i2 = self.SearchBandPlan(hertz)
+    if i1 != i2:	# Frequency is not in the list. Add it at i2.
+      mode = self.ComboMode.GetValue()
+      self.list_ctrl.InsertItem(i2, FormatMHz(hertz * 1E-6))
+      self.list_ctrl.SetItem(i2, 1, mode)
+      self.MakeBackground()
+    self.list_ctrl.Select(i2)
+    self.list_ctrl.EnsureVisible(i2)
+  def SearchBandPlan(self, hertz):
+    # Binary search for the bracket frequency
+    ctrl = self.list_ctrl
+    i1 = 0
+    i2 = length = ctrl.GetItemCount()
+    index = (i1 + i2) // 2
+    for i in range(length):
+      freq = ctrl.GetItem(index, 0).GetText()
+      freq = int(float(freq) * 1E6 + 0.1)
+      diff = freq - hertz
+      if diff < 0:
+        i1 = index
+      elif diff > 0:
+        i2 = index
+      else:		# equal to an item in the list
+        return index, index
+      if i2 - i1 <= 1:
+        break
+      index = (i1 + i2) // 2
+    return i1, i2
+  def OnDelete(self, event):
+    self.list_ctrl.DeleteItem(self.select_index)
+    self.MakeBackground()
+    if self.select_index > 0:
+      self.select_index -= 1
+    self.list_ctrl.Select(self.select_index)
+    self.list_ctrl.EnsureVisible(self.select_index)
+  def OnColorButton(self, event):
+    btn = event.GetEventObject()
+    mode = btn.GetLabel()
+    color = wx.Colour(self.mode_dict[mode])
+    data = wx.ColourData()
+    data.SetColour(color)
+    dlg = wx.ColourDialog(self, data)
+    dlg.GetColourData().SetChooseFull(True)
+    if dlg.ShowModal() == wx.ID_OK:
+      color = dlg.GetColourData()
+      color = color.GetColour()
+      btn.color_ctrl.SetBackgroundColour(color)
+      btn.color_ctrl.Refresh()
+      color = color.GetAsString(wx.C2S_HTML_SYNTAX)
+      self.mode_dict[mode] = color
+      self.color_dict[color] = mode
+    dlg.Destroy()
+  def OnSave(self, event):
+    mode_color = []
+    for mode in self.modes:
+      if mode != "End":
+        mode_color.append([mode, self.mode_dict[mode]])
+    Settings[4]["BandPlanColors"] = mode_color
+    freq_mode = []
+    plan = []
+    ctrl = self.list_ctrl
+    for index in range(ctrl.GetItemCount()):
+      freq = ctrl.GetItem(index, 0).GetText()
+      mode = ctrl.GetItem(index, 1).GetText()
+      freq_mode.append([freq, mode])
+      hertz = int(float(freq) * 1E6 + 0.1)
+      color = self.mode_dict[mode]
+      plan.append([hertz, color])
+    Settings[4]["BandPlan"] = freq_mode
+    application.BandPlan = plan
+    local_conf.settings_changed = True
+    self.EndModal(wx.ID_OK)
+  def OnCancel(self, event):
+    self.EndModal(wx.ID_CANCEL)
+    
+class WsjtxDlg(wx.Dialog, ControlMixin):
+  def __init__(self, parent):
+    txt = 'Configure WSJT-X'
+    wx.Dialog.__init__(self, None, -1, txt, size=(-1, 100))
+    ControlMixin.__init__(self, parent)
+    bg_color = parent.GetBackgroundColour()
+    self.SetBackgroundColour(bg_color)
+    self.parent = parent
+    self.radio_name = "_Global_"
+    self.MakeControls()
+  def MakeControls(self):
+    self.num_cols = 10
+    #self.MarkCols()
+    charx = self.charx
+    chary = self.chary
+    self.gbs.Add (charx * 3, chary * 1, wx.GBPosition(self.row, 9))	# Spacer at the top right
+    self.NextRow()
+    # Path to WSJT-X
+    path = local_conf.globals.get('path_to_wsjtx', '')
+    help_text = "Leave blank for the usual installation path to WSJT-X. If WSJT-X is not in the usual place, enter the path."
+    txt, self.edit_path, btn = self.AddTextEditHelp(1, "Path to Wsjt-x", path, help_text, no_edit=False, span2=5, border=0)
+    self.Bind(wx.EVT_TEXT_ENTER, self.OnEditPath, source=self.edit_path)
+    item = self.AddPushButtonR(8, "Change..", self.OnChangePath, border=0)
+    self.NextRow()
+    self.NextRow()
+    # Configuration name option
+    value = local_conf.globals.get('config_wsjtx', '')
+    hlp = '\
+This is the "--config" option used to specify a configuration when WSJT-X starts. It is normally left blank.'
+    txt, edt, btn = self.AddTextEditHelp(1, "Config name option", value, hlp, no_edit=False, border=0)
+    edt.SetSizeHints(charx * 20, -1, -1, -1)
+    self.Bind(wx.EVT_TEXT_ENTER, self.OnConfigName, source=edt)
+    self.gbs.Add (charx * 3, chary // 2, wx.GBPosition(self.row, 4))	# Middle spacer
+    # Rig name option
+    hlp = '\
+When WSJT-X starts, it uses a rig name to keep different instances separate. \
+This is the "--rig-name" option, and it is set to "quisk".'
+    txt, edt, btn = self.AddTextEditHelp(5, "Rig name option", "quisk", hlp, no_edit=True, border=0)
+    edt.Enable(False)
+    self.NextRow()
+    self.NextRow()
+    # End of controls
+    self.gbs.Add (charx, chary * 2, wx.GBPosition(self.row, 1))	# Spacer at the bottom
+    self.gbs.Fit(self)
+  def OnConfigName(self, event):
+    value = event.GetString()
+    value = value.strip()
+    local_conf.globals['config_wsjtx'] = value
+    local_conf.settings_changed = True
+  def OnChangePath(self, event):
+    path = self.edit_path.GetValue()
+    path = path.strip()
+    if not path:
+      if sys.platform == 'win32':
+        path = "C:\\WSJT\\wsjtx\\bin\\wsjtx.exe"
+      else:
+        path = "/usr/bin/wsjtx"
+    direc, fname = os.path.split(path)
+    dlg = wx.FileDialog(application.main_frame, "Path to WSJT-X", direc, fname, "", wx.FD_OPEN|wx.FD_FILE_MUST_EXIST)
+    if dlg.ShowModal() == wx.ID_OK:
+      path = dlg.GetPath()
+      path = path.strip()
+      self.edit_path.SetValue(path)
+      local_conf.globals['path_to_wsjtx'] = path
+      local_conf.settings_changed = True
+    dlg.Destroy()
+  def OnEditPath(self, event):
+    path = self.edit_path.GetValue()
+    path = path.strip()
+    local_conf.globals['path_to_wsjtx'] = path
+    local_conf.settings_changed = True

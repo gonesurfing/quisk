@@ -1,3 +1,366 @@
+Quisk Version 4.2.14  December 2022
+===================================
+The new file quisk_hardware_fifisdr.py supports the FiFi SDR hardware. Thanks to Joe, LA6GRA.
+I added the rig 2 Hamlib command "U TUNER 1" to control the Spot button.
+The Quisk remote feature now works with the "Small" screen format. Please test.
+
+Quisk Version 4.2.13  December 2022
+===================================
+Python 2 was obsolete as of January 1, 2020. And the new code by Ben, AC2YD, needs Python 3. It is troublesome to write
+code that runs on both Python 2 and Python 3.  So it is time to stop supporting Python 2 in Quisk. Please upgrade to
+Python 3. If you have both versions on your computer use Python 3 for Quisk.
+
+Some have reported that the remote Quisk graph stops after a long Tx. No graph data is sent during Tx, so perhaps the
+open UDP port has expired. I added keepalive graph data that is sent at one second intervals. Let's see if that fixes it.
+
+I added support for the HiQSDR radio to Remote Quisk. I corrected some drawing errors on the config screens. I removed
+the "Help with Radios" config tab and moved the text to the documentation available from the Help button.
+
+Quisk Version 4.2.12  November 2022
+===================================
+I made the Hermes LNA slider control value persistent. This make more sense than having it be a configuration setting.
+When using Quisk Remote, band changes from WSJT-X now correctly set the HL2 filters. I fixed a bug in the SoftRock
+amplitude/phase adjustment screens. I started work on using the "small screen" version of Quisk work as a control head.
+Please test, as more work may be needed.
+
+Quisk Version 4.2.11  November 2022
+===================================
+This is an update to the new Quisk Remote feature by Ben, AC2YD. This version reduces the audio sample rate from 48 ksps
+to 8 ksps. This should help with slow networks, but is is hard to predict the effect. Please test.
+
+If you have dropouts at the new sample rate, try increasing the "Play latency msec" on the Config/Timing screen. Quisk
+buffers sound, and the buffer size can be adjusted.
+
+I fixed the problem with the Split Rx/Tx feature. Please test. Ben made some additional changes for Windows networking.
+
+Quisk Version 4.2.10  October 2022
+==================================
+I improved the Config/Config and Config/TxAudio screens and added help buttons for all items. The File Record
+button no longer overwrites an existing file. It creates a new file each time it is pressed. Enter a base name
+and the files will be base001.wav, base002.wav, etc. Decide on a directory for these files, perhaps the Music
+directory on your computer or a special directory. Files will accumulate there, and must deleted.
+The File Play names will follow the File Record names so that pressing Play after Record plays the current recording.
+I had to change a lot of logic for this, and there may be bugs. So please test.
+
+I fixed some bugs in the new Quisk Remote feature by Ben, AC2YD. The Spot slider is now initialized. I fixed the
+bugs in the Split feature. Please test, and if there are any remaining bugs, please report them. I will add
+a feature to reduce the sample rate from 48 ksps to 8 or 12 ksps as the next step. I didn't add it now because
+it may cause problems. Maybe it will increase latency, or the added processing will be too much for a Raspberry Pi
+used as a remote.
+
+Quisk Version 4.2.9  October 2022
+=================================
+This is an update to the new Quisk Remote feature by Ben, AC2YD. I fixed the problem with the favorites screen
+and the station buttons below the X-axis. I fixed the "Failure in OnFreedvMenu" bug.
+
+Quisk Version 4.2.8  September 2022
+===================================
+This is an update to the new Quisk Remote feature by Ben, AC2YD.
+
+Midi now works with the control head. For HermesLite2, the RfLna is correctly initialized.
+I changed the ports to 4585:TCP control; 4586: graph data; 4587:radio sound and mic. This should
+work correctly with NAT.
+
+The main documentation page docs.html which is available from the Help button now describes the remote feature
+in more detail.
+
+Quisk Version 4.2.7  September 2022
+===================================
+This is an update to the new Quisk Remote feature by Ben, AC2YD.
+
+These features are due to Jaroslav, OK2JRQ: The clip indicator is now sent from the remote to the control head.
+The remote radio IP address can now be a host name or an IP address. TCP and UDP ports are now distinguished
+in the documentation. The control head sends initial graph data to the remote in order to establish a path through NAT.
+The remote radio can now be operated as a normal radio unless there is an active connection to the control head.
+
+The Favorites screen now works. I fixed all the bugs I know of except the segmentation fault on RPi4 raspian
+when closing Quisk. But I need help testing everything. Please test and let me know of any new bugs or bugs
+I missed.
+
+Quisk Version 4.2.6  September 2022
+===================================
+This is an update to the new Quisk Remote feature by Ben, AC2YD. The frequency is now correctly set when
+changing bands. Initial menu items are now set. Frequencies stay synchronized when changing from USB to CWU.
+I changed the graph data from 8 bit to 16 bit.
+
+I improved the config screen visibility when using "Dark" mode.
+
+Quisk Version 4.2.5  September 2022
+===================================
+This is an update to the new Quisk Remote feature by Ben, AC2YD. There is no longer a need to make the screen
+sizes of the control head and remote radio the same. Any size should be OK. If you changed your screen sizes
+to match, please go back to running with different sizes. Then verify that the graph on the control head is correct.
+
+I fixed all the bugs I know about, but this is still beta software. Please test.
+
+Quisk Version 4.2.4  August 2022
+================================
+This version adds the missing ac2yd directory. It is present in the Quisk source distribution but
+missing in the "pip" installs.
+
+Quisk Version 4.2.3  August 2022
+================================
+This is an experimental release to test the new Quisk radio remote control software written by
+Ben Cahill, AC2YD. This allows Quisk running on a local PC to control a remote radio. The remote radio
+is connected to a PC also running Quisk. Ben has tested this on SoftRock CW operation. The current test
+version supports SoftRock and HermesLite2.
+
+Quisk Version 4.2.2  July 2022
+==============================
+I am still working on the Hambib Rig 2 interface. I changed the response to chk_vfo to agree with Hamlib 4.4.
+I did some work on FM demodulation. Please test.
+
+Quisk Version 4.2.1  June 2022
+==============================
+I improved the Hamlib Rig 2 interface. Please continue to report any problems. To test, start Quisk. Then
+in a separate window start "telnet localhost 4532". Send commands to Quisk with telnet and view the response.
+
+I made some improvements to the station line shown below the X axis on the graph. Quisk now has some support
+for the Hermes Lite IO Board.
+
+Quisk Version 4.2.0  May 2022
+==============================
+I added a patch from Jaroslav, OK2JRQ, to improve compatibility with Hamlib. I removed the Python function
+set_transmit_mode() because it seems to be unused. I fixed a lockup problem that happens when the Hermes Lite2 key
+is pressed during SSB operation.
+
+Quisk Version 4.1.96  May 2022
+==============================
+These changes were suggested by Neil, G4BRK. I fixed the bug that touching the CW key in SSB mode locked
+up Quisk in transmit mode. All the Record/Play file names on the Config/Config screen were already saved when
+starting Quisk. The state of the Play device is now saved too. I didn't save the Record check boxes
+because restarting Quisk may overwrite an existing file. When changing between CW and SSB, the transmit and receive
+frequencies are moved by the CW tone frequency. That way if you tune in a CW signal in SSB, and then change to CW
+the CW tone is unchanged, and you are ready to transmit.
+
+I changed the return from Hamlib GetVfo() from "VFO" to "Main" to fix a compatibility problem.
+
+Quisk Version 4.1.95  May 2022
+==============================
+This is a minor release to fix a Midi issue. There is now a separate item on the radio Keys screen to
+control the Midi PTT toggle. I started to add support for my IO Board. But since the IO board is not released,
+the code does nothing.
+
+Quisk Version 4.1.94  April 2022
+================================
+This is a minor release to fix some Midi issues. The Config/Keys "PTT key toggle" item now controls the
+Midi PTT control as well as the hot key PTT. That is, it controls whether the Midi button must be held down
+for PTT, or whether one press turns PTT on and the next press turns it off.
+
+Quisk Version 4.1.93  December 2021
+===================================
+I fixed a bug in the FreeDV button. It now works like other mode buttons.
+
+Quisk can now use the WDSP library to add the additional functions NR2 (noise reduction) and SNB (noise blanker).
+The WDSP library is optional, and you don't have to use it. The library ships with Quisk on Windows. For Linux
+it is used by many other SDR software, and you may already have it. If Quisk can find WDSP, the NR2 button will
+be active. If the NR2 button is grayed out, you can install WDSP on Linux as follows:
+
+ git clone https://github.com/g0orx/wdsp.git
+ cd wdsp
+ make
+ sudo make install
+
+This is an experimental feature, and I can use some feedback on its use.
+
+Quisk Version 4.1.92  October 2021
+==================================
+I changed the power meter on the Hermes Lite 2 from an average value to PEP. The FreeDV sideband and mode
+are now restored on startup.
+
+I fixed a bug that results in errors on tx_level when adding a new radio. I fixed a bug in the new
+PTT key logic. The Midi control now updates the Rf gain display.
+
+Quisk Version 4.1.91  October 2021
+==================================
+I changed the Midi control of the Rit frequency so the center includes the CW tuning offset. I tested this
+with the DJControl Compact that Ben, AC2YD, lent me.
+
+The PTT accelerator key was failing for some users.  It turns out that wx.GetKeyState() is not available
+on all systems. So I had to program around the problem. If you have errors with GetKeyState(),
+change "PTT key toggle" to True and "PTT key if hidden" to False. This is the only combination that
+works with a bad GetKeyState(). While I was at it, I made changing the keys immediate (no need to restart).
+
+I made a change to fix the problem with "digital_rx2_name" not being found.  I don't understand what
+causes this, but the new code is more robust.
+
+I added a button to set the WSJT-X path and config option. It is on the Config/Config screen.
+
+Quisk Version 4.1.90  October 2021
+==================================
+I changed the Midi feature to accommodate more Midi controllers.  I removed the Midi message from
+the Config/Status screen and moved it to the Midi screen (Config/radio/Keys).  You can directly
+assign the Midi message to a Quisk control, and the channel is now recognized. I added the RfLna control.
+
+I added a log file to Quisk. Log messages are sent to the file quisk_logfile.txt which is located with other
+Quisk user files. The item "Debug level" on the Config/radio/Options screen controls the output. 
+A debug screen is shown when "Debug level" is greater than zero.
+
+The serial port PTT feature was not working. I fixed it and made some other improvements. Please test.
+
+Quisk Version 4.1.89  October 2021
+==================================
+I fixed the problem of Quisk crashing when the Config button is pressed. This only happens on the
+Raspberry Pi. I needed to work around a problem with wxPython on the Pi.
+
+Ben, AC2YD, lent me the Midi controller DJControl Compact, and I was then able to
+add some improvements to the Midi feature. Midi now works for all buttons on the Small Screen layout.
+I added control messages for the Volume, Ys and all other Quisk sliders. I added "Tune" to the controls.
+Midi has two kinds of controllers. A "Knob" rotates a whole turn left and right and sends its level as
+a number 0 to 127. A "Jog Wheel" rotates around and around, and sends up and down messages every few degrees.
+I added both types of control.
+
+Quisk Version 4.1.88  October 2021
+==================================
+This version makes digital programs like WSJT-X easier to use. There is a button on the Config/Config
+screen to start WSJT-X. The default is "Never". Select "On startup" to start WSJT-X when Quisk starts.
+Select "Now" to start it now. When Quisk starts WSJT-X, it uses "--rig-name quisk" so that the settings
+you make are saved separately.
+
+On Linux, Quisk can set up virtual sound card names, and I changed these names on the drop down lists.
+For Digital Tx0 Input, choose "Use name QuiskDigitalInput" and then find this name in the WSJT-X sound output menu.
+For Digital Rx0 Output choose "Use name QuiskDigitalOutput.monitor" and then find this name in the WSJT-X sound input menu.
+See the new Quisk documentation http://james.ahlstrom.name/quisk/docs.html#Digital for details.
+
+Quisk Version 4.1.87  September 2021
+====================================
+The documentation now has a better description of how to make a custom hardware file.
+
+I made some changes to the new Midi feature. The Config/Status screen now shows all three bytes of the Midi
+message. I moved the MidiHandler logic to its own file midi_handler.py. If you copy this to your config file,
+your MidiHandler will be used instead. This enables you to completely control Quisk with Midi.
+For example, you can support Control Change messages. Take a look at the comments at the top of midi_handler.py.
+If needed I can add logic to the Keys screen to extend Midi for those not comfortable with Python.
+
+Quisk Version 4.1.86  September 2021
+====================================
+This is a bug fix release to fix a problem with the new Midi logic and Keys screen. Please test.
+
+Quisk Version 4.1.85  September 2021
+====================================
+I made some visual improvements to the configuration screens. This should make them easier to use.
+
+You can now assign Midi notes to Quisk buttons. For example, you can assign note 57 to the PTT button, and
+assign 58 to the Mute button. See the Config/radio/Keys screen. These assignments are global; that is, common
+to all radios. I also moved the existing "Midi CW key" from the CW screen to the new Keys screen. This feature
+is not complete for the "Small Screen" format because some buttons need two presses. Let me know if this is a problem.
+
+You can see the Midi note numbers on the Config/Status screen as they are received. This is useful for discovering
+which note is sent by each Midi key.
+
+Quisk has a new hardware file quisk_hardware_hl2_oob.py. You can specify this name as your hardware file on the
+Config/radio/Hardware screen. It is for use with the Hermes Lite 2, and it disables the power amp when the transmit
+frequency including sidebands is out of band. Be sure to set accurate band edges on the Config/radio/Bands screen.
+You might want to set a new band plan on the Config/Config screen.
+
+Quisk Version 4.1.84  August 2021
+=================================
+Chuck Ritola submitted a patch to correct the phase adjustments in conjunction with channel delay. Thanks Chuck!
+
+I added the Transverter Offset from the Bands screen to SoapySDR.
+
+Quisk shows a color bar on the frequency X-axis to show the band plan. That is, the CW, phone and data segments
+of the band. Since the band plan varies with country, there is a new feature to change it on the config screen.
+Press the Config button and then the Config screen. Look for the "Band plan" button. It will bring up a screen
+to set a list of frequencies and the mode (CW, phone) that starts at each frequency. The screen will start at
+the band plan you are currently using. The band plan is the same for all your radios. You can mark any frequency
+you want, even frequencies outside the ham bands.
+
+Quisk Version 4.1.83  June 2021
+===============================
+This version contains patches by Mooneer, K6AQ, for FreeDV mode 700E. Thanks Mooneer!
+
+Quisk generates its own CW waveform when keyed by the serial port or MIDI.  Quisk delays this CW waveform
+so that when changing from Rx to Tx there is time for relays to switch and power amps to turn on.
+The CW key timing is preserved. This delay was 15 milliseconds, but is now adjustable.
+It is controlled by the "Start CW delay msec" field on the Timing screen. Note that this does not work
+if the key is connected to the hardware and the hardware generates the CW itself.
+
+When switching from Rx to Tx in all modes except CW, Quisk zeros the RF output for a few milliseconds
+to allow time for relays to switch, power amps to turn on and filters to fill with samples. This time was 100
+milliseconds, but is now adjustable. It is controlled by the "Start SSB delay msec" field on the Timing screen.
+
+When Quisk is remote and controlled by another program it is possible that Quisk will be in the transmit state
+when the link is broken. To prevent Quisk from transmitting forever there is now a timeout "Max Tx seconds"
+on the Timing screen. This should normally be set to zero to disable the timeout.
+
+Quisk Version 4.1.82  May 2021
+==============================
+Quisk now works with 64-bit Python 3.9. It is OK to continue using 64-bit Python 3.8, but please upgrade Python
+from earlier versions.
+
+I changed PortAudio and added addition log messages. This is important for Apple Mac.
+
+Quisk Version 4.1.81  April 2021
+================================
+Quisk on Windows now handles devices with 3-byte samples, and works in both Exclusive and Shared mode.
+I tried to catch up on all bug fixes. If I missed any please re-post.
+
+Quisk Version 4.1.80  February 2021
+===================================
+This is a bug fix release. I fixed a problem with sound on Windows when "Fast sound" is False.
+
+Quisk Version 4.1.79  February 2021
+===================================
+This is a bug fix release. I tried again to fix "Failure to convert device name" on Windows. I fixed the
+5 second freeze in CW mode for SoftRock hardware.
+
+Quisk Version 4.1.78  February 2021
+===================================
+Hamlib Rig2 split VFO now controls the frequency of the first added receiver. This is used for working satellites.
+Use the regular Quisk window for the uplink, and the extra receiver for the downlink. Control both frequencies
+with Hamlib. The Hamlib "F" command controls Rx, and the "I" command controls Tx.
+
+I added code by Ben Cahill, AC2YD, to recover from a fault in the playback thread for "fast sound" on Windows.
+I fixed a bug in the HermesLite 2 Small Screen layout. I added address 0x09 bit 17 for the HermesLite 2 radio.
+
+I may have fixed the problem "Failure to convert device name" on Windows. If it is not fixed, the new error
+message should be more informative.
+
+Quisk Version 4.1.77  January 2021
+==================================
+I added further changes to support the YU1LM designs and the Genesis 3020 QRP rigs. When using the ZZBS Hamlib
+command, Quisk now remembers the last frequency and mode. I added back some softrock files that were removed.
+
+Quisk Version 4.1.76  January 2021
+==================================
+If there are errors when Quisk starts on Windows, the window showing the error messages now stays open
+so you can read them. It used to close too fast.
+
+I improved sound buffer levels so they stay closer to 50%. Ben Cahill, AC2YD, contributed code and testing
+support. I corrected Quisk C code so no warning messages are produced by the latest compiler.
+
+I fixed the problem with Hermes write queue timeouts on startup. But these will still appear if the Hermes
+is not running.
+
+I added back the RTS signal to the Linux serial port CW keying logic. This signal goes high when DSR goes high.
+When DSR goes low, RTS goes low after a 1.5 second delay.
+
+Dr. Karsten Schmidt contributed additional logic to the Hamlib serial port. Thanks Karsten!
+I added two new Hamlib commands: ZZAG and ZZBS.
+
+Quisk Version 4.1.75  December 2020
+===================================
+This version includes improvements to the Windows sound code contributed by Ben Cahill, AC2YD, and a fix
+to the Macintosh contributed by Christoph, DL1YCF. Thanks!
+
+The pip install method on Linux now builds the Afedri and Soapy modules properly. Please test.
+
+Quisk Version 4.1.74  December 2020
+===================================
+I added some missing controls to the Hermes-Lite2 Hardware configuration screen. I removed the Alex filter
+band screen and implemented the same logic in the regular Bands screen. If you need the Alex screen,
+please complain.
+
+Quisk now ships with Linux binary files for Python3, not Python2. If you have Python2, run "make"
+to make a Python2 version. You could also start using Python3 instead.
+
+Eric, WW4ET, Davide Gerhard, and Christoph, DL1YCF, provided help to make Quisk run on a Mac. Thanks!
+Christoph provided code. Thanks Christoph! The Mac changes may not be complete. Please test.
+
+SdrIQ support was changed. Quisk now uses the hardware file quisk_hardware_sdriq.py instead of sdriqpkg.
+The directory sdriqpkg and those binary files are now obsolete. The new code is 100% Python.
+
 Quisk Version 4.1.73  November 2020
 ===================================
 I rewrote the logic for SoftRock I/Q amplitude and phase corrections. The new logic will enable much better
@@ -642,7 +1005,7 @@ Quisk can now display and tune multiple sub-receivers if your hardware has them.
 works with the Hermes-Lite hardware.  Push the Help button for documentation.  You can tune
 sub-receivers to different bands and modes, and play audio from any of them.
 
-You can select diferent color schemes from the Radio/Font configuration screen.
+You can select different color schemes from the Radio/Font configuration screen.
 
 I added code to speed up the display of configuration pages when the Config button is pushed.
 
@@ -1247,7 +1610,7 @@ The sample config file quisk_conf.py in hiqsdr can be used as is for the HiQSDR.
 There is a new dictionary tx_level in the config file to set the transmit level.  See
 quisk_conf_defaults.py for other features that can be set for the HiQSDR.
 
-There is a new FPGA firmare version 1.1 available to support the new HiQSDR features.
+There is a new FPGA firmware version 1.1 available to support the new HiQSDR features.
 Note that your firmware version is shown on the Config screen.  It is not necessary to
 update your firmware unless you use the HiQSDR and you want the new HiQSDR control lines
 to work.  If you do update your firmware, you must run Quisk 3.5.5 or later.

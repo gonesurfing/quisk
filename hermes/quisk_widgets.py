@@ -25,10 +25,12 @@ class BottomWidgets:	# Add extra widgets to the bottom of the screen
       b.Enable(False)
     gbs.Add(b, (start_row, self.start_col), (1, 2), flag=wx.EXPAND)
     bw, bh = b.GetMinSize()
-    init = self.config.hermes_LNA_dB
-    sl = app.SliderBoxHH(frame, 'RfLna %d dB', init, -12, 48, self.OnLNA, True)
+    init = app.hermes_LNA_dB
+    self.sliderLNA = app.SliderBoxHH(frame, 'RfLna %d dB', init, -12, 48, self.OnLNA, True)
+    self.sliderLNA.idName = "RfLna"
+    app.midiControls["RfLna"]	= (self.sliderLNA,	self.OnLNA)
     hardware.ChangeLNA(init)
-    gbs.Add(sl, (start_row, self.start_col + 2), (1, 8), flag=wx.EXPAND)
+    gbs.Add(self.sliderLNA, (start_row, self.start_col + 2), (1, 8), flag=wx.EXPAND)
     if conf.button_layout == "Small screen":
       # Display four data items in a single window
       self.text_temperature = app.QuiskText1(frame, '', bh)
@@ -41,8 +43,8 @@ class BottomWidgets:	# Add extra widgets to the bottom of the screen
       self.text_swr.Hide()
       b = app.QuiskPushbutton(frame, self.OnTextDataMenu, '..')
       szr = self.data_sizer = wx.BoxSizer(wx.HORIZONTAL)
-      szr.Add(self.text_data, 1, flag=wx.ALIGN_LEFT|wx.ALIGN_CENTER_VERTICAL)
-      szr.Add(b, 0, flag=wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
+      szr.Add(self.text_data, 1, flag=wx.ALIGN_CENTER_VERTICAL)
+      szr.Add(b, 0, flag=wx.ALIGN_CENTER_VERTICAL)
       gbs.Add(szr, (start_row, self.start_col + 10), (1, 2), flag=wx.EXPAND)
       # Make a popup menu for the data window
       self.text_data_menu = wx.Menu()
@@ -73,10 +75,10 @@ class BottomWidgets:	# Add extra widgets to the bottom of the screen
     btn = event.GetEventObject()
     value = btn.GetValue()
     self.hardware.ChangeAGC(value)
-  def OnLNA(self, event):
-    sl = event.GetEventObject()
-    value = sl.GetValue()
+  def OnLNA(self, event=None):
+    value = self.sliderLNA.GetValue()
     self.hardware.ChangeLNA(value)
+    self.application.hermes_LNA_dB = value
   def Code2Temp(self):		# Convert the HermesLite temperature code to the temperature
     temp = self.hardware.hermes_temperature
     # For best accuracy, 3.26 should be a user's measured 3.3V supply voltage.
@@ -92,11 +94,9 @@ class BottomWidgets:	# Add extra widgets to the bottom of the screen
     # Scale by resistor voltage divider 1000/(1000+270) at input of slow ADC
     current = current / (1000.0/1270.0)
     return current
-  def Code2FwdRevWatts(self):	# Convert the HermesLite fwd/rev power code to watts forward and reverse
+  def Code2FwdRevWatts(self, fwd, rev):	# Convert the HermesLite fwd/rev power code to watts forward and reverse
     #print (self.hardware.hermes_rev_power, self.hardware.hermes_fwd_power)
-    fwd = self.hardware.hermes_fwd_power
     fwd = self.hardware.InterpolatePower(fwd)
-    rev = self.hardware.hermes_rev_power
     rev = self.hardware.InterpolatePower(rev)
     # Which voltage is forward and reverse depends on the polarity of the current sense transformer
     if fwd >= rev:
@@ -112,15 +112,16 @@ class BottomWidgets:	# Add extra widgets to the bottom of the screen
     current = self.Code2Current()
     current = " PA %4.0f ma" % (1000*current)
     self.text_pa_current.SetLabel(current)
-    # forward and reverse power
-    fwd, rev = self.Code2FwdRevWatts()
+    # forward and reverse peak power
+    fwd, rev = self.Code2FwdRevWatts(self.hardware.hermes_fwd_peak, self.hardware.hermes_rev_peak)
     # forward less reverse power
     power = fwd - rev
     if power < 0.0:
       power = 0.0
-    text = " PA %3.1f watts" % power
+    text = " PEP %3.1f watts" % power
     self.text_fwd_power.SetLabel(text)
-    # SWR
+    # SWR based on average power
+    fwd, rev = self.Code2FwdRevWatts(self.hardware.hermes_fwd_power, self.hardware.hermes_rev_power)
     if fwd >= 0.05:
       gamma = math.sqrt(rev / fwd)
       if gamma < 0.98:

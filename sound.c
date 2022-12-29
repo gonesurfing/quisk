@@ -1,19 +1,21 @@
 /*
  * Sound modules that do not depend on alsa or portaudio
 */
+#define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <complex.h>
 #include <math.h>
 #include <sys/time.h>
 #include <time.h>
+#include <errno.h>
 
 #ifdef MS_WINDOWS
-#include <Winsock2.h>
+#include <winsock2.h>
 #include <stdint.h>
 #else
 #include <sys/socket.h>
 #include <arpa/inet.h>
-#include <netinet/in.h>
+#include <netinet/ip.h>
 #endif
 
 #include "quisk.h"
@@ -49,24 +51,31 @@ struct sound_dev quisk_Playback;
 struct sound_dev quisk_MicPlayback;
 
 static struct sound_dev Capture, MicCapture, DigitalInput, DigitalOutput, RawSamplePlayback;
-struct sound_dev quisk_DigitalRx1Output;
+static struct sound_dev dr1, dr2, dr3, dr4, dr5, dr6, dr7, dr8, dr9;		// sound output for digital sub-receivers
 // These are arrays of all capture and playback devices, and MUST end with NULL:
 static struct sound_dev * CaptureDevices[] = {&Capture, &MicCapture, &DigitalInput, NULL};
-static struct sound_dev * PlaybackDevices[] = {&quisk_Playback, &quisk_MicPlayback, &DigitalOutput, &RawSamplePlayback, &quisk_DigitalRx1Output, NULL};
+struct sound_dev * quiskPlaybackDevices[QUISK_INDEX_SUB_RX1 + QUISK_MAX_SUB_RECEIVERS + 1] = {
+	&quisk_Playback, &quisk_MicPlayback, &DigitalOutput, &RawSamplePlayback,
+	&dr1, &dr2, &dr3, &dr4, &dr5, &dr6, &dr7, &dr8, &dr9,
+	NULL};
+
 static SOCKET radio_sound_socket = INVALID_SOCKET;		// send radio sound samples to a socket
 static SOCKET radio_sound_mic_socket = INVALID_SOCKET;	// receive mic samples from a socket
 static int radio_sound_nshorts;						// number of shorts (two bytes) to send
 static int radio_sound_mic_nshorts;					// number of shorts (two bytes) to receive
 int quisk_active_sidetone;		// quisk_active_sidetone == 0 No sidetone; == 1 sidetone from wasapi; == 2 sidetone from old logic
+int quisk_midi_cwkey;			// the CW key from MIDI NoteOn/NoteOff messages
+int remote_control_head;
+int remote_control_slave;
 
 struct sound_conf quisk_sound_state;	// Current sound status
+struct sound_conf * pt_quisk_sound_state = &quisk_sound_state;
 
 // Keep this array of names up to date with quisk.h
 char * sound_format_names[4] = {"Int32", "Int16", "Float32", "Int24"} ;
 
 static struct wav_file file_rec_audio, file_rec_samples, file_rec_mic;
-
-static int file_record_button;			// the file record button is down
+static int close_file_rec;
 
 static double digital_output_level = 0.7;
 static int dc_remove_bw=100;			// bandwidth of DC removal filter
@@ -247,13 +256,11 @@ void quisk_record_audio(struct wav_file * wavfile, complex double * cSamples, in
 			fclose(wavfile->fp);
 		wavfile->fp = fp = fopen(wavfile->file_name, "wb");
 		if ( ! fp) {
-			wavfile->enable = 0;
 			return;
 		}
 		if (fwrite("RIFF", 1, 4, fp) != 4) {
 			fclose(fp);
 			wavfile->fp = NULL;
-			wavfile->enable = 0;
 			return;
 		}
 		// pcm data, 16-bit samples, one channel
@@ -330,13 +337,11 @@ static int record_samples(struct wav_file * wavfile, complex double * cSamples, 
 			fclose(wavfile->fp);
 		wavfile->fp = fp = fopen(wavfile->file_name, "wb");
 		if ( ! fp) {
-			wavfile->enable = 0;
 			return 0;
 		}
 		if (fwrite("RIFF", 1, 4, fp) != 4) {
 			fclose(fp);
 			wavfile->fp = NULL;
-			wavfile->enable = 0;
 			return 0;
 		}
 		// IEEE float data, two channels
@@ -368,7 +373,6 @@ static int record_samples(struct wav_file * wavfile, complex double * cSamples, 
 		if (wavfile->fp)
 			fclose(wavfile->fp);
 		wavfile->fp = NULL;
-		wavfile->enable = 0;
 		break;
 	default:	// write the sound data to the file
 		fp = wavfile->fp;
@@ -438,39 +442,19 @@ int read_sound_interface(
    switch( dev->driver )
    {
       case DEV_DRIVER_DIRECTX:
-#ifdef QUISK_HAVE_DIRECTX
          nSamples = quisk_read_directx(dev, cSamples);
-#else
-	 nSamples = 0;
-#endif
          break;
       case DEV_DRIVER_WASAPI:
-#ifdef QUISK_HAVE_WASAPI
          nSamples = quisk_read_wasapi(dev, cSamples);
-#else
-	 nSamples = 0;
-#endif
          break;
       case DEV_DRIVER_PORTAUDIO:
-#ifdef QUISK_HAVE_PORTAUDIO
          nSamples = quisk_read_portaudio(dev, cSamples);
-#else
-         nSamples = 0;
-#endif
          break;
       case DEV_DRIVER_ALSA:
-#ifdef QUISK_HAVE_ALSA
          nSamples = quisk_read_alsa(dev, cSamples);
-#else
-	 nSamples = 0;
-#endif
          break;
       case DEV_DRIVER_PULSEAUDIO:
-#ifdef QUISK_HAVE_PULSEAUDIO
          nSamples = quisk_read_pulseaudio(dev, cSamples);
-#else
-         nSamples = 0;
-#endif
          break;
       case DEV_DRIVER_NONE:
       default:
@@ -505,70 +489,122 @@ int read_sound_interface(
  * \param volume Input. [0,1] volume ratio
  * \returns number of samples read
  */
-void play_sound_interface(
-   struct sound_dev* dev,
-   int nSamples,
-   complex double * cSamples,
-   int report_latency,
-   double volume
-)
+#define AVG_SEC		10.0
+void play_sound_interface(struct sound_dev* dev, int nSamples, complex double * cSamples, int report_latency, double volume)
 {
-   int i;
-   double avg, samp, re, im, frac, diff;
+	int i;
+	double avg, samp, re, im, frac, diff, tm;
 
-   if (cSamples && nSamples > 0 && dev->sample_rate > 0) {
-      // Calculate average squared level
-      avg = dev->average_square;
-      frac = 1.0 / (0.2 * dev->sample_rate);
-      for (i = 0; i < nSamples; i++) {
-         re = creal(cSamples[i]);
-         im = cimag(cSamples[i]);
-         samp = re * re + im * im;
-         diff = samp - avg;
-         if (diff >= 0)
-            avg = samp;	// set to peak value
-         else
-            avg = avg + frac * diff;
-      }
-      dev->average_square = avg;
-   }
-   // Play using correct driver.
-   switch( dev->driver )
-   {
-      case DEV_DRIVER_DIRECTX:
-#ifdef QUISK_HAVE_DIRECTX
-         quisk_play_directx(dev, nSamples, cSamples, report_latency, volume);
+	if (cSamples && nSamples > 0 && dev->sample_rate > 0) {
+		// Calculate average squared level
+		avg = dev->average_square;
+		frac = 1.0 / (0.2 * dev->sample_rate);
+		for (i = 0; i < nSamples; i++) {
+			re = creal(cSamples[i]);
+			im = cimag(cSamples[i]);
+			samp = re * re + im * im;
+			diff = samp - avg;
+			if (diff >= 0)
+				avg = samp;	// set to peak value
+			else
+				avg = avg + frac * diff;
+		}
+		dev->average_square = avg;
+	}
+#if 0
+	static int disturb_time = 0;
+	// Damage the sample rate for debug
+	disturb_time += nSamples;
+	if (disturb_time > 300) {
+		nSamples++;
+		disturb_time = 0;
+	}
 #endif
-         break;
-      case DEV_DRIVER_WASAPI:
-#ifdef QUISK_HAVE_WASAPI
-         quisk_play_wasapi(dev, nSamples, cSamples, volume);
-#endif
-         break;
-      case DEV_DRIVER_WASAPI2:
-#ifdef QUISK_HAVE_WASAPI
-         quisk_write_wasapi(dev, nSamples, cSamples, volume);
-#endif
-         break;
-      case DEV_DRIVER_PORTAUDIO:
-#ifdef QUISK_HAVE_PORTAUDIO
-         quisk_play_portaudio(dev, nSamples, cSamples, report_latency, volume);
-#endif
-         break;
-      case DEV_DRIVER_ALSA:
-#ifdef QUISK_HAVE_ALSA
-         quisk_play_alsa(dev, nSamples, cSamples, report_latency, volume);
-#endif
-         break;
-      case DEV_DRIVER_PULSEAUDIO:
-#ifdef QUISK_HAVE_PULSEAUDIO
-         quisk_play_pulseaudio(dev, nSamples, cSamples, report_latency, volume);
-#endif
-         break;
-      case DEV_DRIVER_NONE:
-      default:
-         break;
-   }
+	// Correct sample rate by reference to the buffer_fill <> 0.5
+	if (dev->cr_correction != 0) {
+		dev->cr_sample_time += nSamples;
+		if (dev->cr_sample_time >= dev->cr_correct_time && nSamples >= 2) {
+			dev->cr_sample_time = 0;
+			if (dev->cr_correction > 0) {	// add a sample
+				//printf("Add    a sample\n");
+				cSamples[nSamples] = cSamples[nSamples - 1];
+				cSamples[nSamples - 1] = (cSamples[nSamples - 2] + cSamples[nSamples]) / 2.0;
+				nSamples++;
+			}
+			else {			// remove a sample
+				//printf("Remove a sample\n");
+				nSamples--;
+			}
+		}
+	}
+	// Play using correct driver.
+  	switch( dev->driver ) {
+	case DEV_DRIVER_DIRECTX:
+		quisk_play_directx(dev, nSamples, cSamples, report_latency, volume);
+		break;
+	case DEV_DRIVER_WASAPI:
+		quisk_play_wasapi(dev, nSamples, cSamples, volume);
+		break;
+	case DEV_DRIVER_WASAPI2:
+		quisk_write_wasapi(dev, nSamples, cSamples, volume);
+		break;
+	case DEV_DRIVER_PORTAUDIO:
+		quisk_play_portaudio(dev, nSamples, cSamples, report_latency, volume);
+		break;
+	case DEV_DRIVER_ALSA:
+		quisk_play_alsa(dev, nSamples, cSamples, report_latency, volume);
+		break;
+	case DEV_DRIVER_PULSEAUDIO:
+		quisk_play_pulseaudio(dev, nSamples, cSamples, report_latency, volume);
+		break;
+	case DEV_DRIVER_NONE:
+	default:
+		break;
+	}
+	// Calculate a new sample rate correction
+	tm = QuiskTimeSec();
+	if (tm - dev->TimerTime0 > AVG_SEC) {
+		dev->TimerTime0 = tm;
+		if (dev->cr_average_count <= 0) {
+			dev->cr_correction = 0;
+		}
+		else if (dev->dev_index == t_MicPlayback && (rxMode == CWL || rxMode == CWU)) {
+			dev->cr_correction = 0;
+			dev->cr_average_fill /= dev->cr_average_count;
+			if (quisk_sound_state.verbose_sound > 1)
+				QuiskPrintf("%s:  Buffer average %5.2lf\n", dev->stream_description, dev->cr_average_fill * 100);
+		}
+		else if (dev->cr_delay > 0) {
+			dev->cr_delay--;
+			dev->cr_correction = 0;
+			dev->cr_average_fill /= dev->cr_average_count;
+			if (quisk_sound_state.verbose_sound > 1)
+				QuiskPrintf("%s:  Buffer average %5.2lf\n", dev->stream_description, dev->cr_average_fill * 100);
+		}
+		else if ( ! (dev->dev_index == t_Playback || dev->dev_index == t_MicPlayback)) {
+			dev->cr_correction = 0;
+			dev->cr_average_fill /= dev->cr_average_count;
+			if (quisk_sound_state.verbose_sound > 1)
+				QuiskPrintf("%s:  Buffer average %5.2lf\n", dev->stream_description, dev->cr_average_fill * 100);
+		}
+		else {
+			dev->cr_average_fill /= dev->cr_average_count;
+			if (dev->cr_average_fill > 0.55)
+				dev->cr_correction = -0.05 * dev->play_buf_size;
+			else if (dev->cr_average_fill < 0.45)
+				dev->cr_correction = 0.05 * dev->play_buf_size;
+			else
+				dev->cr_correction = (0.5 - dev->cr_average_fill) * dev->play_buf_size;
+			if (dev->cr_correction != 0)
+				dev->cr_correct_time = abs(dev->sample_rate * AVG_SEC / dev->cr_correction);
+			if (quisk_sound_state.verbose_sound > 1)
+				QuiskPrintf("%s:  Buffer average %5.2lf cr_correction %5d\n",
+					dev->stream_description, dev->cr_average_fill * 100, dev->cr_correction);
+		}
+		dev->cr_average_fill = 0;
+		dev->cr_average_count = 0;
+		dev->cr_sample_time = 0;
+	}
 }
 
 static int read_radio_sound_socket(complex double * cSamples)
@@ -769,7 +805,8 @@ void * quisk_make_sidetone(struct sound_dev * dev, int rewind)
 }
 
 int quisk_play_sidetone(struct sound_dev * dev)
-{
+{  // return 1 if we played the ALSA sidetone
+#ifdef QUISK_HAVE_ALSA
 	static int last_play_state = 0;
 
 	if (quisk_play_state <= RECEIVE && last_play_state <= RECEIVE)
@@ -780,12 +817,13 @@ int quisk_play_sidetone(struct sound_dev * dev)
 	if (quisk_isFDX)
 		return 0;
 	if (dev->driver == DEV_DRIVER_ALSA) {
-#ifdef QUISK_HAVE_ALSA
 		quisk_alsa_sidetone(dev);
-#endif
 		return 1;
 	}
 	return 0;
+#else
+	return 0;
+#endif
 }
 
 int quisk_read_sound(void)	// Called from sound thread
@@ -798,19 +836,28 @@ int quisk_read_sound(void)	// Called from sound thread
 	static complex double tuneVector = (double)CLIP32 / CLIP16;	// Convert 16-bit to 32-bit samples
 	static struct quisk_cFilter filtInterp={NULL};
 	int key_state, is_DGT;
+#if DEBUG_IO > 1
+	char str80[80];		// Extra debug output by Ben Cahill, AC2YD
+#endif
 #if DEBUG_MIC == 1
 	complex double tmpSamples[SAMP_BUFFER_SIZE];
 #endif
 
+	if (close_file_rec) {
+		close_file_rec = 0;
+		quisk_record_audio(&file_rec_audio, NULL, -2);
+		quisk_record_audio(&file_rec_mic, NULL, -2);
+		record_samples(&file_rec_samples, NULL, -2);
+	}
 	//QuiskPrintTime("quisk_read_sound start", 0);
-	quisk_sound_state.interupts++;
+	quisk_sound_state.interrupts++;
 	if (quisk_use_serial_port) {
 		quisk_poll_hardware_key();
 	}
 	quisk_set_play_state();
 	key_state = quisk_is_key_down(); //reading this once is important for predicable bevavior on cork/flush
 #if DEBUG_IO > 1
-	QuiskPrintTime("Start read_sound", 0);
+	QuiskPrintTime("Start quisk_read_sound", 0);
 #endif
 
 #ifdef QUISK_HAVE_PULSEAUDIO
@@ -861,10 +908,14 @@ int quisk_read_sound(void)	// Called from sound thread
 		DCremove(cSamples, nSamples, quisk_sound_state.sample_rate, key_state);
 		if (nSamples <= 0)
 			QuiskSleepMicrosec(2000);
+#if DEBUG_IO > 1
+		snprintf(str80, 80, "  rx i/q read %d samples", nSamples);
+		QuiskPrintTime(str80, 0);
+#endif
 	}
 	else {
 		QuiskSleepMicrosec(5000);
-		nSamples = QuiskDeltaMsec(1) * quisk_sound_state.sample_rate / 1000;
+		nSamples = (int)(0.5 + QuiskDeltaSec(1) * quisk_sound_state.sample_rate);
 		if (nSamples > SAMP_BUFFER_SIZE / 2)
 			nSamples = SAMP_BUFFER_SIZE / 2;
 		for (i = 0; i < nSamples; i++)
@@ -881,9 +932,6 @@ int quisk_read_sound(void)	// Called from sound thread
 	ptimer (nSamples);
 #endif
 	quisk_sound_state.latencyCapt = nSamples;	// samples available
-#if DEBUG_IO > 1
-	QuiskPrintTime("  read samples", 0);
-#endif
 	// Perhaps record the Rx samples to a file
 	if ( ! key_state && file_rec_samples.fp)
 		record_samples(&file_rec_samples, cSamples, nSamples);
@@ -891,21 +939,27 @@ int quisk_read_sound(void)	// Called from sound thread
 	if (RawSamplePlayback.handle)
 		play_sound_interface(&RawSamplePlayback, nSamples, cSamples, 0, 1.0);
 	// Perhaps replace the samples with samples from a file
-	if (quisk_record_state == PLAY_SAMPLES)
+	if (quisk_record_state == FILE_PLAY_SAMPLES)
 		quisk_play_samples(cSamples, nSamples);
 #if ! DEBUG_MIC
 	nSamples = quisk_process_samples(cSamples, nSamples);
 #endif
 #if DEBUG_IO > 1
-	QuiskPrintTime("  process samples", 0);
+	snprintf(str80, 80, "  rx i/q process %d samples", nSamples);
+	QuiskPrintTime(str80, 0);
 #endif
+	// For control_head role in remote control operation, receive radio sound via UDP
+	if (remote_control_head)
+		nSamples = read_remote_radio_sound_socket(cSamples);
+	// For remote_radio role in remote control operation, send radio sound via UDP
+	if (remote_control_slave)
+		send_remote_radio_sound_socket(cSamples, nSamples);
 
 	is_DGT = rxMode == DGT_U || rxMode == DGT_L || rxMode == DGT_IQ || rxMode == DGT_FM;
-	if (quisk_record_state == PLAYBACK)
+	if (quisk_record_state == TMP_PLAY_SPKR_MIC)
 		quisk_tmp_playback(cSamples, nSamples, 1.0);		// replace radio sound
-	else if (quisk_record_state == PLAY_FILE)
+	else if (quisk_record_state == FILE_PLAY_SPKR_MIC)
 		quisk_file_playback(cSamples, nSamples, 1.0);		// replace radio sound
-   
 	// Play the demodulated audio
 #if DEBUG_MIC != 2
 	if ( ! quisk_play_sidetone(&quisk_Playback))	// play sidetone
@@ -923,25 +977,31 @@ int quisk_read_sound(void)	// Called from sound thread
 		quisk_record_audio(&file_rec_audio, cSamples, nSamples);   // Record Rx samples
 
 #if DEBUG_IO > 1
-	QuiskPrintTime("  play samples", 0);
+	snprintf(str80, 80, "  play %d radio sound samples", nSamples);
+	QuiskPrintTime(str80, 0);
 #endif
 	// Read and process the microphone
 	mic_sample_rate = quisk_sound_state.mic_sample_rate;
-	if (MicCapture.handle)
+	if (MicCapture.handle) {
 		mic_count = read_sound_interface(&MicCapture, cSamples);
+#if DEBUG_IO > 1
+		snprintf(str80, 80, "  mic read %d samples", mic_count);
+		QuiskPrintTime(str80, 0);
+#endif
+	}
 	else if (radio_sound_mic_socket != INVALID_SOCKET)
 		mic_count = read_radio_sound_socket(cSamples);
 	else {      // No mic source; use zero samples
-		mic_count = QuiskDeltaMsec(0) * mic_sample_rate / 1000;
+		mic_count = (int)(0.5 + QuiskDeltaSec(0) * mic_sample_rate);
 		if (mic_count > SAMP_BUFFER_SIZE / 2)
 			mic_count = SAMP_BUFFER_SIZE / 2;
 		for (i = 0; i < mic_count; i++)
 			cSamples[i] = 0;
 	}
 	//QuiskPrintTime("quisk_read_sound end", 0);
-	if (quisk_record_state == PLAYBACK)			// Discard previous samples and replace with saved sound
+	if (quisk_record_state == TMP_PLAY_SPKR_MIC)			// Discard previous samples and replace with saved sound
 		quisk_tmp_microphone(cSamples, mic_count);
-	else if (quisk_record_state == PLAY_FILE)	// Discard previous samples and replace with saved sound
+	else if (quisk_record_state == FILE_PLAY_SPKR_MIC)	// Discard previous samples and replace with saved sound
 		quisk_file_microphone(cSamples, mic_count);
 	if (DigitalInput.handle) {
 		if (is_DGT) {		// Discard previous mic samples and use digital samples
@@ -963,10 +1023,16 @@ int quisk_read_sound(void)	// Called from sound thread
 	// Perhaps record the microphone audio to the microphone audio file
 	if (file_rec_mic.fp)
 		quisk_record_audio(&file_rec_mic, cSamples, mic_count);
+
+	// For remote_radio role in remote control operation, read mic sound via UDP; replace any mic sound from above.
+	if (remote_control_slave)
+		mic_count = read_remote_mic_sound_socket(cSamples);
+
+	// For control_head role in remote control operation, send mic sound via UDP
+	if (remote_control_head)
+		send_remote_mic_sound_socket(cSamples, mic_count);
+
 	if (mic_count > 0) {
-#if DEBUG_IO > 1
-		QuiskPrintTime("  mic-read", 0);
-#endif
 #if DEBUG_MIC == 3
 		quisk_process_samples(cSamples, mic_count);
 #endif
@@ -978,7 +1044,8 @@ int quisk_read_sound(void)	// Called from sound thread
 		quisk_process_samples(tmpSamples, mic_count);
 #endif
 #if DEBUG_IO > 1
-		QuiskPrintTime("  mic-proc", 0);
+		snprintf(str80, 80, "  mic process %d samples", mic_count);
+		QuiskPrintTime(str80, 0);
 #endif
 	}
 	//quisk_sample_level("quisk_process_microphone", cSamples, mic_count, CLIP16);
@@ -1048,12 +1115,13 @@ int quisk_read_sound(void)	// Called from sound thread
 				tuneVector *= tx_mic_phase;
 			}
 		}
-		// delay the I or Q channel by one sample
-		if (quisk_MicPlayback.channel_Delay >= 0)
-			delay_sample(&quisk_MicPlayback, (double *)cSamples, mic_count);
+		// Correct order of delay and phase by Chuck Ritola.  Thanks Chuck.
 		// amplitude and phase corrections
 		if (quisk_MicPlayback.doAmplPhase)
 			correct_sample (&quisk_MicPlayback, cSamples, mic_count);
+		// delay the I or Q channel by one sample
+		if (quisk_MicPlayback.channel_Delay >= 0)
+			delay_sample(&quisk_MicPlayback, (double *)cSamples, mic_count);
 		// play mic samples
 		//quisk_sample_level("play quisk_MicPlayback", cSamples, mic_count, CLIP32);
 		play_sound_interface(&quisk_MicPlayback, mic_count, cSamples, 1, mic_play_volume);
@@ -1063,7 +1131,8 @@ int quisk_read_sound(void)	// Called from sound thread
 #endif
 	}
 #if DEBUG_IO > 1
-	QuiskPrintTime("  finished", 0);
+	snprintf(str80, 80, "  play %d tx i/q samples; finished", mic_count);
+	QuiskPrintTime(str80, 0);
 #endif
 	// Return negative number for error
 	return retval;
@@ -1085,24 +1154,14 @@ void quisk_close_sound(void)	// Called from sound thread
 #ifdef MS_WINDOWS
 	int cleanup = radio_sound_socket != INVALID_SOCKET || radio_sound_mic_socket != INVALID_SOCKET;
 #endif
-#ifdef QUISK_SOUND_DIRECTX
-	quisk_close_sound_directx(CaptureDevices, PlaybackDevices);
-#endif
-#ifdef QUISK_SOUND_WASAPI
-	quisk_close_sound_wasapi(CaptureDevices, PlaybackDevices);
-#endif
-#ifdef QUISK_HAVE_PORTAUDIO
+	quisk_close_sound_directx(CaptureDevices, quiskPlaybackDevices);
+	quisk_close_sound_wasapi(CaptureDevices, quiskPlaybackDevices);
 	quisk_close_sound_portaudio();
-#endif
-#ifdef QUISK_HAVE_ALSA
-	quisk_close_sound_alsa(CaptureDevices, PlaybackDevices);
-#endif
-#ifdef QUISK_HAVE_PULSEAUDIO
+	quisk_close_sound_alsa(CaptureDevices, quiskPlaybackDevices);
 	quisk_close_sound_pulseaudio();
-#endif
 	if (pt_sample_stop)
 		(*pt_sample_stop)();
-	strncpy (quisk_sound_state.err_msg, CLOSED_TEXT, QUISK_SC_SIZE);
+	strMcpy (quisk_sound_state.err_msg, CLOSED_TEXT, QUISK_SC_SIZE);
 	if (radio_sound_socket != INVALID_SOCKET) {
 		close(radio_sound_socket);
 		radio_sound_socket = INVALID_SOCKET;
@@ -1142,8 +1201,8 @@ static void open_radio_sound_socket(void)
 #endif
 
 	dc_remove_bw = QuiskGetConfigInt ("dc_remove_bw", 100);
-	strncpy(radio_sound_ip, QuiskGetConfigString ("radio_sound_ip", ""), QUISK_SC_SIZE);
-	strncpy(radio_sound_mic_ip, QuiskGetConfigString ("radio_sound_mic_ip", ""), QUISK_SC_SIZE);
+	strMcpy(radio_sound_ip, QuiskGetConfigString ("radio_sound_ip", ""), QUISK_SC_SIZE);
+	strMcpy(radio_sound_mic_ip, QuiskGetConfigString ("radio_sound_mic_ip", ""), QUISK_SC_SIZE);
 	if (radio_sound_ip[0] == 0 && radio_sound_mic_ip[0] == 0)
 		return;
 #ifdef MS_WINDOWS
@@ -1221,35 +1280,63 @@ PyObject * quisk_set_sound_name(PyObject * self, PyObject * args)	// Called from
 	char * device_name;	// The device name from quisk.py
 	const char * utf8 = "utf-8";
 	int index, play, driver;
+	Py_ssize_t l1, l2;
 
-	if (!PyArg_ParseTuple (args, "iiieses", &index, &play, &driver, utf8, &description, utf8, &device_name))
+	description = malloc(QUISK_SC_SIZE);
+	device_name = malloc(QUISK_SC_SIZE);
+	l1 = l2 = QUISK_SC_SIZE;
+	if (!PyArg_ParseTuple (args, "iiies#es#", &index, &play, &driver, utf8, &description, &l1, utf8, &device_name, &l2))
 		return NULL;
 	if (play) {
-		strncpy(PlaybackDevices[index]->name, description, QUISK_SC_SIZE);
-		strncpy(PlaybackDevices[index]->device_name, device_name, QUISK_SC_SIZE);
-		PlaybackDevices[index]->driver = driver;
+		strMcpy(quiskPlaybackDevices[index]->name, description, QUISK_SC_SIZE);
+		strMcpy(quiskPlaybackDevices[index]->device_name, device_name, QUISK_SC_SIZE);
+		quiskPlaybackDevices[index]->driver = driver;
 	}
 	else {
-		strncpy(CaptureDevices[index]->name, description, QUISK_SC_SIZE);
-		strncpy(CaptureDevices[index]->device_name, device_name, QUISK_SC_SIZE);
+		strMcpy(CaptureDevices[index]->name, description, QUISK_SC_SIZE);
+		strMcpy(CaptureDevices[index]->device_name, device_name, QUISK_SC_SIZE);
 		CaptureDevices[index]->driver = driver;
 	}
-	PyMem_Free(description);
-	PyMem_Free(device_name);
+	free(description);
+	free(device_name);
 	Py_INCREF (Py_None);
 	return Py_None;
+}
+
+static void set_digital_rx()	// Set playback devices for digital modes from sub-receivers
+{
+	int i;
+	char buf80[80];
+	struct sound_dev * rx_dev;
+
+	for (i = QUISK_INDEX_SUB_RX1; i < QUISK_INDEX_SUB_RX1 + QUISK_MAX_SUB_RECEIVERS; i++) {
+		rx_dev = quiskPlaybackDevices[i];
+		rx_dev->dev_errmsg[0] = 0;
+		rx_dev->dev_index = t_DigitalRx1Output;
+		snprintf(buf80, 80, "Digital Rx%d Output", i - QUISK_INDEX_SUB_RX1 + 1);
+		strMcpy(rx_dev->stream_description, buf80, QUISK_SC_SIZE);
+		rx_dev->sample_rate = 48000;
+		rx_dev->channel_I = 0;
+		rx_dev->channel_Q = 1;
+		set_num_channels (rx_dev);
+		rx_dev->average_square = 0;
+		rx_dev->stream_dir_record = 0;
+		rx_dev->read_frames = 0;
+		rx_dev->latency_frames = rx_dev->sample_rate * quisk_sound_state.latency_millisecs / 1000;
+	}
 }
 
 void quisk_open_sound(void)	// Called from GUI thread
 {
 	int i;
+	struct sound_dev * pPlay;
 
 	quisk_play_state = SHUTDOWN;
 	quisk_sound_state.read_error = 0;
 	quisk_sound_state.write_error = 0;
 	quisk_sound_state.underrun_error = 0;
 	quisk_sound_state.mic_read_error = 0;
-	quisk_sound_state.interupts = 0;
+	quisk_sound_state.interrupts = 0;
 	quisk_sound_state.rate_min = quisk_sound_state.rate_max = -99;
 	quisk_sound_state.chan_min = quisk_sound_state.chan_max = -99;
 	quisk_sound_state.msg1[0] = 0;
@@ -1261,7 +1348,6 @@ void quisk_open_sound(void)	// Called from GUI thread
 	DigitalInput.dev_errmsg[0] = 0;
 	DigitalOutput.dev_errmsg[0] = 0;
 	RawSamplePlayback.dev_errmsg[0] = 0;
-	quisk_DigitalRx1Output.dev_errmsg[0] = 0;
 	Capture.dev_index = t_Capture;
 	quisk_Playback.dev_index = t_Playback;
 	MicCapture.dev_index = t_MicCapture;
@@ -1269,22 +1355,22 @@ void quisk_open_sound(void)	// Called from GUI thread
 	DigitalInput.dev_index = t_DigitalInput;
 	DigitalOutput.dev_index = t_DigitalOutput;
 	RawSamplePlayback.dev_index = t_RawSamplePlayback;
-	quisk_DigitalRx1Output.dev_index = t_DigitalRx1Output;
+
+	set_digital_rx();
 
 	// Set stream descriptions. This is important for "deviceless" drivers like
 	// PulseAudio to be able to distinguish the streams from each other.
-	strncpy(Capture.stream_description, "I/Q Rx Sample Input", QUISK_SC_SIZE);
+	strMcpy(Capture.stream_description, "I/Q Rx Sample Input", QUISK_SC_SIZE);
 	Capture.stream_description[QUISK_SC_SIZE-1] = '\0';
-	strncpy(quisk_Playback.stream_description, "Radio Sound Output", QUISK_SC_SIZE);
+	strMcpy(quisk_Playback.stream_description, "Radio Sound Output", QUISK_SC_SIZE);
 	quisk_Playback.stream_description[QUISK_SC_SIZE-1] = '\0';
-	strncpy(MicCapture.stream_description, "Microphone Input", QUISK_SC_SIZE);
+	strMcpy(MicCapture.stream_description, "Microphone Input", QUISK_SC_SIZE);
 	MicCapture.stream_description[QUISK_SC_SIZE-1] = '\0';
-	strncpy(quisk_MicPlayback.stream_description, "I/Q Tx Sample Output", QUISK_SC_SIZE);
+	strMcpy(quisk_MicPlayback.stream_description, "I/Q Tx Sample Output", QUISK_SC_SIZE);
 	quisk_MicPlayback.stream_description[QUISK_SC_SIZE-1] = '\0';
-	strncpy(DigitalInput.stream_description, "External Digital Input", QUISK_SC_SIZE);
-	strncpy(DigitalOutput.stream_description, "External Digital Output", QUISK_SC_SIZE);
-	strncpy(RawSamplePlayback.stream_description, "Raw Digital Output", QUISK_SC_SIZE);
-	strncpy(quisk_DigitalRx1Output.stream_description, "Digital Rx1 Output", QUISK_SC_SIZE);
+	strMcpy(DigitalInput.stream_description, "Digital Tx0 Input", QUISK_SC_SIZE);
+	strMcpy(DigitalOutput.stream_description, "Digital Rx0 Output", QUISK_SC_SIZE);
+	strMcpy(RawSamplePlayback.stream_description, "Raw Digital Output", QUISK_SC_SIZE);
    
 	quisk_Playback.sample_rate = quisk_sound_state.playback_rate;		// Radio sound play rate
 	quisk_MicPlayback.sample_rate = quisk_sound_state.mic_playback_rate;
@@ -1304,10 +1390,6 @@ void quisk_open_sound(void)	// Called from GUI thread
 	RawSamplePlayback.sample_rate = quisk_sound_state.sample_rate;
 	RawSamplePlayback.channel_I = 0;
 	RawSamplePlayback.channel_Q = 1;
-	// Playback device for digital modes from sub-receivers
-	quisk_DigitalRx1Output.sample_rate = 48000;
-	quisk_DigitalRx1Output.channel_I = 0;
-	quisk_DigitalRx1Output.channel_Q = 1;
 
 	set_num_channels (&Capture);
 	set_num_channels (&quisk_Playback);
@@ -1316,7 +1398,16 @@ void quisk_open_sound(void)	// Called from GUI thread
 	set_num_channels (&DigitalInput);
 	set_num_channels (&DigitalOutput);
 	set_num_channels (&RawSamplePlayback);
-	set_num_channels (&quisk_DigitalRx1Output);
+
+	for (i = 0; (pPlay = quiskPlaybackDevices[i]); i++) {
+		pPlay->started = 0;
+		pPlay->cr_correction = 0;
+		pPlay->cr_delay = 3;
+		pPlay->cr_average_fill = 0;
+		pPlay->cr_average_count = 0;
+		pPlay->cr_sample_time = 0;
+		pPlay->cr_correct_time = 0;
+	}
 
 	Capture.average_square = 0;
 	quisk_Playback.average_square = 0;
@@ -1325,7 +1416,6 @@ void quisk_open_sound(void)	// Called from GUI thread
 	DigitalInput.average_square = 0;
 	DigitalOutput.average_square = 0;
 	RawSamplePlayback.average_square = 0;
-	quisk_DigitalRx1Output.average_square = 0;
 
 	//Needed for pulse audio context connection (KM4DSJ)
 	Capture.stream_dir_record = 1;
@@ -1335,12 +1425,11 @@ void quisk_open_sound(void)	// Called from GUI thread
 	DigitalInput.stream_dir_record = 1;
 	DigitalOutput.stream_dir_record = 0;
 	RawSamplePlayback.stream_dir_record = 0;
-	quisk_DigitalRx1Output.stream_dir_record = 0;
 
 	//For remote IQ server over pulseaudio (KM4DSJ)
 	if (quisk_sound_state.IQ_server[0]) {
-		strncpy(Capture.server, quisk_sound_state.IQ_server, IP_SIZE);
-		strncpy(quisk_MicPlayback.server, quisk_sound_state.IQ_server, IP_SIZE);
+		strMcpy(Capture.server, quisk_sound_state.IQ_server, IP_SIZE);
+		strMcpy(quisk_MicPlayback.server, quisk_sound_state.IQ_server, IP_SIZE);
 	}
 
 
@@ -1373,8 +1462,6 @@ void quisk_open_sound(void)	// Called from GUI thread
 	DigitalInput.latency_frames = 0;
 	DigitalOutput.read_frames = 0;
 	DigitalOutput.latency_frames = DigitalOutput.sample_rate * quisk_sound_state.latency_millisecs / 1000;
-	quisk_DigitalRx1Output.read_frames = 0;
-	quisk_DigitalRx1Output.latency_frames = quisk_DigitalRx1Output.sample_rate * quisk_sound_state.latency_millisecs / 1000;
 	// set capture and playback for raw samples
 	RawSamplePlayback.read_frames = 0;
 	RawSamplePlayback.latency_frames = RawSamplePlayback.sample_rate * quisk_sound_state.latency_millisecs / 1000;
@@ -1390,21 +1477,11 @@ void quisk_start_sound(void)	// Called from sound thread
 		(*pt_sample_start)();
    
 	// Let the drivers see the devices and start them up if appropriate
-#ifdef QUISK_HAVE_DIRECTX
-	quisk_start_sound_directx(CaptureDevices, PlaybackDevices);
-#endif
-#ifdef QUISK_HAVE_WASAPI
-	quisk_start_sound_wasapi(CaptureDevices, PlaybackDevices);
-#endif
-#ifdef QUISK_HAVE_PORTAUDIO
-	quisk_start_sound_portaudio(CaptureDevices, PlaybackDevices);
-#endif
-#ifdef QUISK_HAVE_PULSEAUDIO
-	quisk_start_sound_pulseaudio(CaptureDevices, PlaybackDevices);
-#endif
-#ifdef QUISK_HAVE_ALSA
-	quisk_start_sound_alsa(CaptureDevices, PlaybackDevices);
-#endif
+	quisk_start_sound_directx(CaptureDevices, quiskPlaybackDevices);
+	quisk_start_sound_wasapi(CaptureDevices, quiskPlaybackDevices);
+	quisk_start_sound_portaudio(CaptureDevices, quiskPlaybackDevices);
+	quisk_start_sound_pulseaudio(CaptureDevices, quiskPlaybackDevices);
+	quisk_start_sound_alsa(CaptureDevices, quiskPlaybackDevices);
 	if (pt_sample_read) {	// Capture from SDR-IQ or UDP
 		quisk_sound_state.rate_min = quisk_Playback.rate_min;
 		quisk_sound_state.rate_max = quisk_Playback.rate_max;
@@ -1417,8 +1494,8 @@ void quisk_start_sound(void)	// Called from sound thread
 		quisk_sound_state.chan_min = Capture.chan_min;
 		quisk_sound_state.chan_max = Capture.chan_max;
 	}
-	QuiskDeltaMsec(0);	// Set timer to zero
-	QuiskDeltaMsec(1);
+	QuiskDeltaSec(0);	// Set timer to zero
+	QuiskDeltaSec(1);
 	quisk_set_play_state();
 	quisk_play_state = STARTING;
 }
@@ -1477,12 +1554,28 @@ PyObject * quisk_micplay_channels(PyObject * self, PyObject * args)	// Called fr
 
 PyObject * quisk_set_sparams(PyObject * self, PyObject * args, PyObject * keywds)
 {  /* Call with keyword arguments ONLY; change local parameters */
-	static char * kwlist[] = {"dc_remove_bw", "digital_output_level", NULL} ;
+	static char * kwlist[] = {"dc_remove_bw", "digital_output_level", "remote_control_slave", "remote_control_head",
+		NULL} ;
 
-	if (!PyArg_ParseTupleAndKeywords (args, keywds, "|id", kwlist, &dc_remove_bw, &digital_output_level))
+	if (!PyArg_ParseTupleAndKeywords (args, keywds, "|idii", kwlist, &dc_remove_bw, &digital_output_level,
+	&remote_control_slave, &remote_control_head))
 		return NULL;
 	Py_INCREF (Py_None);
 	return Py_None;
+}
+
+PyObject * quisk_dummy_sound_devices(PyObject * self, PyObject * args)
+{  // Return an empty list of sound devices
+	PyObject * pylist, * pycapt, * pyplay;
+
+	if (!PyArg_ParseTuple (args, ""))
+		return NULL;
+	pylist = PyList_New(0);		// list [pycapt, pyplay]
+	pycapt = PyList_New(0);		// list of capture devices
+	pyplay = PyList_New(0);		// list of play devices
+	PyList_Append(pylist, pycapt);
+	PyList_Append(pylist, pyplay);
+	return pylist;
 }
 
 void quisk_udp_mic_error(char * msg)
@@ -1510,23 +1603,25 @@ static void AddCard(struct sound_dev * dev, PyObject * pylist)
 PyObject * quisk_sound_errors(PyObject * self, PyObject * args)
 {  // return a list of strings with card names and error counts
 	PyObject * pylist;
+	struct sound_dev * rx_dev;
 
 	if (!PyArg_ParseTuple (args, ""))
 		return NULL;
 	pylist = PyList_New(0);
 	AddCard(&Capture,	pylist);
 	AddCard(&MicCapture,	pylist);
-	AddCard(&DigitalInput,	pylist);
 	AddCard(&quisk_Playback,	pylist);
 	AddCard(&quisk_MicPlayback,	pylist);
-	AddCard(&DigitalOutput,	pylist);
 	AddCard(&RawSamplePlayback, pylist);
-	AddCard(&quisk_DigitalRx1Output, pylist);
+	AddCard(&DigitalInput,	pylist);
+	AddCard(&DigitalOutput,	pylist);
+	rx_dev = quiskPlaybackDevices[QUISK_INDEX_SUB_RX1];
+	AddCard(rx_dev, pylist);
 	return pylist;
 }
 
 PyObject * quisk_set_file_name(PyObject * self, PyObject * args, PyObject * keywds)  // called from GUI
-{  // Set the names and enable state of the recording and playback files.
+{
 	int which = -1;
 	const char * name = NULL;
 	int enable = -1;
@@ -1536,54 +1631,34 @@ PyObject * quisk_set_file_name(PyObject * self, PyObject * args, PyObject * keyw
 
 	if (!PyArg_ParseTupleAndKeywords (args, keywds, "|isiii", kwlist, &which, &name, &enable, &play_button, &record_button))
 		return NULL;
-	switch (which) {
-	case 0:		// record audio file
-		if (name)
-			strncpy(file_rec_audio.file_name, name, QUISK_PATH_SIZE);
-		if (enable != -1)
-			file_rec_audio.enable = enable;
-		break;
-	case 1:		// record sample file
-		if (name)
-			strncpy(file_rec_samples.file_name, name, QUISK_PATH_SIZE);
-		if (enable != -1)
-			file_rec_samples.enable = enable;
-		break;
-	case 2:		// record mic file
-		if (name)
-			strncpy(file_rec_mic.file_name, name, QUISK_PATH_SIZE);
-		if (enable != -1)
-			file_rec_mic.enable = enable;
-		break;
-	case 10:	// play audio file
-		break;
-	case 11:	// play samples file
-		break;
-	case 12:	// play CQ message file
-		break;
+	if (record_button == 0) {	// Close all recording files
+		close_file_rec = 1;
 	}
-	if (record_button != -1)
-		file_record_button = record_button;
-	if (file_rec_audio.enable && file_record_button){	// Open and Close Rx audio file
-		if ( ! file_rec_audio.fp)
-			quisk_record_audio(&file_rec_audio, NULL, -1);	// Open file
+	if (play_button == 0) {	// Close all play files
+		quisk_close_file_play = 1;
 	}
-	else if (file_rec_audio.fp) {
-		quisk_record_audio(&file_rec_audio, NULL, -2);		// Close file
-	}
-	if (file_rec_mic.enable && file_record_button){		// Open and Close microphone audio file
-		if ( ! file_rec_mic.fp)
-			quisk_record_audio(&file_rec_mic, NULL, -1);
-	}
-	else if (file_rec_mic.fp) {
-		quisk_record_audio(&file_rec_mic, NULL, -2);
-	}
-	if (file_rec_samples.enable && file_record_button){ // Open and Close I/Q samples file
-		if ( ! file_rec_samples.fp)
+	if (record_button == 1) switch (which) {
+		case 0:		// record audio file
+			if (name)
+				strMcpy(file_rec_audio.file_name, name, QUISK_PATH_SIZE);
+			quisk_record_audio(&file_rec_audio, NULL, -1);
+			break;
+		case 1:		// record sample file
+			if (name)
+				strMcpy(file_rec_samples.file_name, name, QUISK_PATH_SIZE);
 			record_samples(&file_rec_samples, NULL, -1);
-	}
-	else if (file_rec_samples.fp) {
-		record_samples(&file_rec_samples, NULL, -2);
+			break;
+		case 2:		// record mic file
+			if (name)
+				strMcpy(file_rec_mic.file_name, name, QUISK_PATH_SIZE);
+			quisk_record_audio(&file_rec_mic, NULL, -1);
+			break;
+		case 10:	// play audio file
+			break;
+		case 11:	// play samples file
+			break;
+		case 12:	// play CQ message file
+			break;
 	}
 	Py_INCREF (Py_None);
 	return Py_None;

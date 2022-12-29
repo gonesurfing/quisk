@@ -29,6 +29,8 @@ class Hardware:
     # This method must return a string showing whether the open succeeded or failed.
     t = "Capture from sound card %s." % self.conf.name_of_sound_capt
     return t
+  def post_open(self):		# Quisk calls this once after open() and after sound is started
+    pass
   def close(self):			# Quisk calls this once to close the Hardware
     pass
   def ChangeFrequency(self, tune, vfo, source='', band='', event=None):
@@ -73,7 +75,9 @@ class Hardware:
     pass
   def OnBtnFDX(self, is_fdx):   # Status of FDX button, 0 or 1
     pass
-  def HeartBeat(self):	# Called at about 10 Hz by the main
+  def HeartBeat(self):	# Called at about 10 Hz by the GUI thread
+    pass
+  def FastHeartBeat(self):	# Called frequently by the GUI thread
     pass
   # The "VarDecim" methods are used to change the hardware decimation rate.
   # If VarDecimGetChoices() returns any False value, no other methods are called.
@@ -113,7 +117,7 @@ class Hardware:
     # length is the number of samples in each block of ADC samples, and equals the FFT size.
     QS.set_params(bscope_bytes=int_size, bscope_endian=endian, bscope_size=length)
     self.application.bandscope_clock = clock
-  #def PollCwKey(self):  # Optional. Called frequently by Quisk to check the CW key status.
+  #def PollCwKey(self):  # Optional. Called frequently by the sound thread to check the CW key status.
   #  pass        # Do not define if not needed.
   def StartSamples(self):	# Quisk calls this from the sound thread to start sending samples.
     # If you return a string, it replaces the string returned from hardware open()

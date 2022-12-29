@@ -100,15 +100,15 @@ class Hardware(BaseHardware):
       self.HamlibSend("|m\n")		# Poll for mode
   def HamlibSend(self, text):
     if DEBUG: print('Send', text, end=' ')
-    try:
-      self.hamlib_socket.sendall(text)
+    try:	# Patch thanks to Rolandas, LY0NAS
+      self.hamlib_socket.sendall(text.encode('utf-8', errors='ignore'))
     except socket.error:
       pass
   def ReadHamlib(self):
     if not self.hamlib_connected:
       return
     try:	# Read any data from the socket
-      text = self.hamlib_socket.recv(1024)
+      text = self.hamlib_socket.recv(1024).decode('utf-8', errors='replace')
     except socket.timeout:	# This does not work
       pass
     except socket.error:	# Nothing to read
@@ -150,7 +150,7 @@ class Hardware(BaseHardware):
               self.quisk_mode = mode
               if mode in ('CW', 'CWR'):
                 mode = 'CWU'
-              self.application.OnBtnMode(None, mode)		# Set mode
+              self.application.modeButns.SetLabel(mode, True)		# Set mode
         else:
           if DEBUG: print('Unknown', reply)
       except:

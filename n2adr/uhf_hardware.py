@@ -29,15 +29,15 @@ class Preamp:	# Lone Wire Bus control of preamp for 2 meters and 70 cm
     self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     self.socket.connect((self.IP, self.PORT))
     self.socket.settimeout(0)
-    self.want_preamp = self.have_preamp = '\000'
+    self.want_preamp = self.have_preamp = b'\000'
   def ChangeBand(self, band):
     if band == '2':
-      self.want_preamp = '\001'
+      self.want_preamp = b'\001'
     elif band == '70cm':
-      self.want_preamp = '\002'
+      self.want_preamp = b'\002'
     else:
-      self.want_preamp = '\000'
-    #print ("ChangeBand", band)
+      self.want_preamp = b'\000'
+    #print ("Preamp ChangeBand", band)
   def HeartBeat(self):
     try:
       data = self.socket.recv(4096)
@@ -74,8 +74,8 @@ class Hardware(BaseHardware):
     self.firmware_version = None	# firmware version is initially unknown
     self.rx_udp_socket = None
     self.tx_udp_socket = None
-    self.got_rx_udp_status = ''
-    self.got_tx_udp_status = ''
+    self.got_rx_udp_status = bytearray()
+    self.got_tx_udp_status = bytearray()
     self.band = ''
     self.rx_phase0 = self.rx_phase1 = 0
     self.tx_phase = 0
@@ -175,7 +175,12 @@ class Hardware(BaseHardware):
     self.socket_sndp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     self.socket_sndp.setblocking(0)
     self.socket_sndp.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    self.sndp_request = chr(56) + chr(0) + chr(0x5A) + chr(0xA5) + chr(0) * 52
+    self.sndp_request = bytearray()
+    self.sndp_request.append(56)
+    self.sndp_request.append(0)
+    self.sndp_request.append(0x5A)
+    self.sndp_request.append(0xA5)
+    self.sndp_request += bytearray(52)
     self.sndp_rx_active = True
     # conf.rx_udp_port is used for returning ADC samples
     # conf.rx_udp_port + 1 is used for control
@@ -258,31 +263,50 @@ class Hardware(BaseHardware):
         break
       if len(data) != 56:
         continue
-      if data[5:17] == 'QuiskUHFR-v1':
+      if data[5:17] == b'QuiskUHFR-v1':
         ip = self.conf.rx_udp_ip.split('.')
         ip = list(map(int, ip))
-        ip = list(map(chr, ip))
         if data[37] == ip[3] and data[38] == ip[2] and data[39] == ip[1] and data[40] == ip[0]:
           self.sndp_rx_active = False
           if DEBUG: print("SNDP success for Rx")
         else:
-          t = (data[0:4] + chr(2) + data[5:37] + ip[3] + ip[2] + ip[1] + ip[0]
-             + chr(0) * 12 + chr(self.conf.rx_udp_port & 0xFF) + chr(self.conf.rx_udp_port >> 8) + chr(0))
+          t = bytearray()
+          t += data[0:4]
+          t.append(2)
+          t += data[5:37]
+          t.append(ip[3])
+          t.append(ip[2])
+          t.append(ip[1])
+          t.append(ip[0])
+          t += bytearray(12)
+          t.append(self.conf.rx_udp_port & 0xFF)
+          t.append(self.conf.rx_udp_port >> 8)
+          t.append(0)
           self.socket_sndp.sendto(t, (self.broadcast_addr, 48321))
-      elif data[5:17] == 'QuiskUHFT-v1':
+      elif data[5:17] == b'QuiskUHFT-v1':
         if self.conf.tx_ip:
           ip = self.conf.tx_ip.split('.')
           ip = list(map(int, ip))
-          ip = list(map(chr, ip))
           if data[37] == ip[3] and data[38] == ip[2] and data[39] == ip[1] and data[40] == ip[0]:
             self.sndp_tx_active = False
             if DEBUG: print("SNDP success for Tx")
           else:
-            t = (data[0:4] + chr(2) + data[5:37] + ip[3] + ip[2] + ip[1] + ip[0]
-               + chr(0) * 12 + chr(self.conf.tx_audio_port & 0xFF) + chr(self.conf.tx_audio_port >> 8) + chr(0))
+            t = bytearray()
+            t += data[0:4]
+            t.append(2)
+            t += data[5:37]
+            t.append(ip[3])
+            t.append(ip[2])
+            t.append(ip[1])
+            t.append(ip[0])
+            t += bytearray(12)
+            t.append(self.conf.tx_audio_port & 0xFF)
+            t.append(self.conf.tx_audio_port >> 8)
+            t.append(0)
             self.socket_sndp.sendto(t, (self.broadcast_addr, 48321))
   def HeartBeat(self):
     if self.sndp_rx_active or self.sndp_tx_active:
+      if DEBUG: print ("Try SNDP", self.sndp_rx_active, self.sndp_tx_active)
       self.Sndp()
       return        # SNDP is required
     for i in range(10):
@@ -293,7 +317,7 @@ class Hardware(BaseHardware):
       except:
         break
       else:
-        if data[0:2] == 'Sx':
+        if data[0:2] == b'Sx':
           self.got_rx_udp_status = data
     if self.tx_udp_socket:
       for i in range(10):
@@ -304,10 +328,10 @@ class Hardware(BaseHardware):
         except:
           break
         else:
-          if data[0:2] == 'Sx':
+          if data[0:2] == b'Sx':
             self.got_tx_udp_status = data
     if self.want_rx_udp_status[16:] == self.got_rx_udp_status[16:]:   # The first part returns information from the hardware
-      self.firmware_version = ord(self.got_rx_udp_status[2])       # Firmware version is returned here
+      self.firmware_version = self.got_rx_udp_status[2]       # Firmware version is returned here
       self.Rx4351.changed = 0
     else:
       if DEBUG > 1:
@@ -333,7 +357,7 @@ class Hardware(BaseHardware):
         #traceback.print_exc()
         pass
     if 0:
-      self.rx_udp_socket.send('Qs')
+      self.rx_udp_socket.send(b'Qs')
     self.preamp.HeartBeat()
   def VarDecimGetChoices(self):		# return text labels for the control
     return self.var_rates
@@ -388,16 +412,17 @@ class Hardware(BaseHardware):
     self.decim2 = self.rx_udp_clock_nominal // rate // self.decim1 // self.decim3
   def NewUdpStatus(self):
     # Start of 16 bytes sent to the hardware:
-    s = "Sx"            # 0:2   Fixed string 
-    s += chr(0)         # 2     Version number is returned here
-    s += chr(0)         # 3
-    s += chr(0) * 12    # 4:16
+    s = bytearray()
+    s += b"Sx"		# 0:2   Fixed string 
+    s.append(0)		# 2     Version number is returned here
+    s.append(0)		# 3
+    s += bytes(12)	# 4:16
     # Start of 80 bytes of data sent to the hardware:
-    s += chr( 6 - 1)						#  0    Variable decimation less one channel 0 first
-    s += chr(12 - 1)			        	#  1    Variable decimation less one channel 0 second
+    s.append( 6 - 1)					#  0    Variable decimation less one channel 0 first
+    s.append(12 - 1)			        	#  1    Variable decimation less one channel 0 second
     s += struct.pack("<L", self.rx_phase0)	#  2: 6 Channel zero Rx tune phase
     s += struct.pack("<L", self.rx_phase1)	#  6:10 Channel one Rx tune phase)
-    s += chr(0x3 | self.scan_enable << 2 | self.Rx4351.changed << 3 |
+    s.append(0x3 | self.scan_enable << 2 | self.Rx4351.changed << 3 |
             self.Tx4351.changed << 4 | self.Tx9951_changed << 5 |
             self.button_PTT << 6 | self.mode_is_cw << 7)		# 10    Flags
         # 0: enable samples on channel 0
@@ -408,11 +433,11 @@ class Hardware(BaseHardware):
         # 5: the transmit ad9951 register changed
         # 6: the PTT button is down
         # 7: the mode is CWU or CWL
-    s += chr(self.scan_blocks)						# 11    For scan, the number of frequency blocks
+    s.append(self.scan_blocks)						# 11    For scan, the number of frequency blocks
     s += struct.pack("<H", self.scan_samples)		# 12:14 For scan, the number of samples per block
     s += struct.pack("<L", self.scan_phase)			# 14:18 For scan, the tuning phase increment
-    s += chr(self.decim1 - 1)				    	# 18    Variable decimation less one channel 1 first
-    s += chr(self.decim2 - 1)		        		# 19    Variable decimation less one channel 1 second
+    s.append(self.decim1 - 1)				    	# 18    Variable decimation less one channel 1 first
+    s.append(self.decim2 - 1)		        		# 19    Variable decimation less one channel 1 second
     s += self.Rx4351.regs                           # 20:44 Receive adf4351; six 32-bit registers, 24 bytes
     s += self.Tx4351.regs                           # 44:68 Transmit adf4351; six 32-bit registers, 24 bytes
     s += self.ad9951_data                           # 68:74 Transmit ad9951: data length, instruction, 4 bytes of data
@@ -420,7 +445,7 @@ class Hardware(BaseHardware):
     DcQ = int(self.DcQ * 32767.0)
     s += struct.pack("<h", DcI)                # 74:76 Transmit DC correction for I channel
     s += struct.pack("<h", DcQ)                # 76:78 Transmit DC correction for Q channel
-    s += chr(0) * (96 - len(s))     # Fixed length message 16 + 80
+    s += bytearray(96 - len(s))		# Fixed length message 16 + 80
     self.want_rx_udp_status = s
   def NewAd9951(self, tx_freq):
     # Fpfd = Fref / 2 / R = Fvco / N
@@ -431,9 +456,12 @@ class Hardware(BaseHardware):
     freq = 2.0 * adf.r_counter * (2 ** adf.rf_divider) / adf.int_value * (tx_freq * 2.0)
     phase = int(freq / self.tx_clock80 * 2.0**32 + 0.5)
     try:
-      self.ad9951_data = chr(40) + struct.pack("<L", phase ) + chr(4)
+      self.ad9951_data = bytearray()
+      self.ad9951_data.append(40)
+      self.ad9951_data += struct.pack("<L", phase )
+      self.ad9951_data.append(4)
     except struct.error:
-      self.ad9951_data = chr(0) * 6
+      self.ad9951_data = bytearray(6)
     self.ad9951_freq = float(phase) * self.tx_clock80 / 2 ** 32
     ##adf.frequency = 0.5 * self.ad9951_freq * adf.int_value / 2.0 / adf.r_counter / (2 ** adf.rf_divider)
     self.Tx9951_changed = 1

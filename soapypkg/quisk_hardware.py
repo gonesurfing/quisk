@@ -83,11 +83,11 @@ class Hardware(BaseHardware):
     if soapy:
       soapy.close_device(1)
   def ChangeFrequency(self, tune, vfo, source='', band='', event=None):
-    fVFO = float(vfo)
+    fVFO = float(vfo - self.transverter_offset)
     if self.fVFO != fVFO:
       self.fVFO = fVFO
       self.set_parameter('soapy_setFrequency_rx', '', fVFO)
-    self.set_parameter('soapy_setFrequency_tx', '', float(tune))
+    self.set_parameter('soapy_setFrequency_tx', '', float(tune - self.transverter_offset))
     return tune, vfo
   def ReturnFrequency(self):
     # Return the current tuning and VFO frequency.  If neither have changed,
@@ -117,10 +117,7 @@ class Hardware(BaseHardware):
     pass
   def ChangeBand(self, band):
     # band is a string: "60", "40", "WWV", etc.
-    try:
-      self.transverter_offset = self.conf.bandTransverterOffset[band]
-    except:
-      self.transverter_offset = 0
+    BaseHardware.ChangeBand(self, band)
   def HeartBeat(self):	# Called at about 10 Hz by the main
     pass
   def ImmediateChange(self, name, value):

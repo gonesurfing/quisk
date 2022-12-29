@@ -34,6 +34,8 @@
  * 2020 Apr by N2ADR Changes in printf's
 */
 
+#ifdef QUISK_HAVE_PULSEAUDIO
+
 #include <Python.h>
 #include <stdio.h>
 #include <string.h>
@@ -69,7 +71,7 @@ static int have_QuiskDigitalOutput;	// Do we need to create this null sink?
  * tell the quisk thread when streams are ready. 
  */
 
-void stream_state_callback(pa_stream *s, void *userdata) {
+static void stream_state_callback(pa_stream *s, void *userdata) {
     struct sound_dev *dev = userdata;
     assert(s);
     assert(dev);
@@ -317,7 +319,7 @@ static void server_info_cb(pa_context *c, const pa_server_info *info, void *user
 
 
 //Context state callback. Basically here to pass initialization to server_info_cb
-void state_cb(pa_context *c, void *userdata) {
+static void state_cb(pa_context *c, void *userdata) {
     pa_context_state_t state;
     state = pa_context_get_state(c);
     switch  (state) {
@@ -508,7 +510,7 @@ int quisk_read_pulseaudio(struct sound_dev *dev, complex double *cSamples)
        if (dev->sample_bytes == 4) {  //float32
            float fi, fq;
            
-           for( i = 0; i < read_bytes; i += (dev->num_channels * 4)) {
+           for( i = 0; i < (int)read_bytes; i += (dev->num_channels * 4)) {
                memcpy(&fi, fbuffer + i + (dev->channel_I * 4), 4);
                memcpy(&fq, fbuffer + i + (dev->channel_Q * 4), 4);
                if (fi >=  1.0 || fi <= -1.0)
@@ -523,7 +525,7 @@ int quisk_read_pulseaudio(struct sound_dev *dev, complex double *cSamples)
        
        else if (dev->sample_bytes == 2) { //16bit integer little-endian
            int16_t si, sq;
-           for( i = 0; i < read_bytes; i += (dev->num_channels * 2)) {
+           for( i = 0; i < (int)read_bytes; i += (dev->num_channels * 2)) {
                memcpy(&si, fbuffer + i + (dev->channel_I * 2), 2);
                memcpy(&sq, fbuffer + i + (dev->channel_Q * 2), 2);
                if (si >= CLIP16  || si <= -CLIP16)
@@ -560,7 +562,7 @@ void quisk_play_pulseaudio(struct sound_dev *dev, int nSamples, complex double *
     pa_stream *s = dev->handle;
     int i=0, n=0;
     void *fbuffer;
-    int fbuffer_bytes = 0;
+    size_t fbuffer_bytes = 0;
 
     if( !dev || nSamples <= 0 || dev->pulse_stream_state != PA_STREAM_READY)
         return;
@@ -627,14 +629,14 @@ void quisk_play_pulseaudio(struct sound_dev *dev, int nSamples, complex double *
             writable = 1024*1000;
         if (fbuffer_bytes > writable) {
             if (quisk_sound_state.verbose_pulse && dev->dev_index <= t_MicPlayback)	// ignore for digital interfaces
-                printf("Truncating write on %s by %u bytes\n", dev->stream_description, fbuffer_bytes - (int)writable);
+                printf("Truncating write on %s by %lu bytes\n", dev->stream_description, fbuffer_bytes - writable);
             fbuffer_bytes = writable;
         }
-        pa_stream_write(dev->handle, fbuffer, (size_t)fbuffer_bytes, NULL, 0, PA_SEEK_RELATIVE);
+        pa_stream_write(dev->handle, fbuffer, fbuffer_bytes, NULL, 0, PA_SEEK_RELATIVE);
     }
     else {
         if (quisk_sound_state.verbose_pulse && dev->dev_index <= t_MicPlayback)
-            printf("Can't write to stream %s. Dropping %d bytes\n", dev->stream_description, fbuffer_bytes);
+            printf("Can't write to stream %s. Dropping %lu bytes\n", dev->stream_description, fbuffer_bytes);
     }
     
     pa_threaded_mainloop_unlock(pa_ml);
@@ -644,7 +646,7 @@ void quisk_play_pulseaudio(struct sound_dev *dev, int nSamples, complex double *
 
 
 //This is a function to sort the device list into local and remote lists.
-void sort_devices(struct sound_dev **plist, struct sound_dev **pLocal, struct sound_dev **pRemote) {
+static void sort_devices(struct sound_dev **plist, struct sound_dev **pLocal, struct sound_dev **pRemote) {
 
     while(*plist) {
         struct sound_dev *dev = *plist++;
@@ -813,7 +815,7 @@ void quisk_close_sound_pulseaudio() {
 
 
 // Additional bugs added by N2ADR below this point.
-// Code for quisk_pa_sound_devices is based on code by Igor Brezac and Eric Connell, and Jan Newmarch.
+// Code for quisk_pulseaudio_sound_devices is based on code by Igor Brezac and Eric Connell, and Jan Newmarch.
 // This should only be called when Quisk first starts, but names changed to protect the other mainloop.
 
 // This callback gets called when our context changes state.  We really only
@@ -887,7 +889,7 @@ static void index_callback(pa_context *c, uint32_t idx, void *userdata) {
     //printf("%u\n", idx);
 }
 
-PyObject * quisk_pa_sound_devices(PyObject * self, PyObject * args)
+PyObject * quisk_pulseaudio_sound_devices(PyObject * self, PyObject * args)
 {	// Return a list of PulseAudio device names [pycapt, pyplay]
 	PyObject * pylist, * pycapt, * pyplay;
 	pa_mainloop *pa_names_ml;
@@ -1009,16 +1011,53 @@ PyObject * quisk_pa_sound_devices(PyObject * self, PyObject * args)
     //printf("Finished with name loop\n");
 	return pylist;
 }
+#else		// No PulseAudio available
+#include <Python.h>
+#include <complex.h>
+#include "quisk.h"
 
-#if !defined(QUISK_HAVE_ALSA) && !defined(QUISK_HAVE_WASAPI)
-//
-// quisk_control_midi and the CW-MIDI status variable are defined in these two
-// modules. If they are not present, we must provide a dummy here. On MacOS,
-// we can even provide a functional replacement (ToDO)
-
-PyObject * quisk_control_midi(PyObject * self, PyObject * args, PyObject * keywds)
-{
-return Py_None;
+PyObject * quisk_pulseaudio_sound_devices(PyObject * self, PyObject * args)
+{	// Return a list of PulseAudio device names [pycapt, pyplay]
+	return quisk_dummy_sound_devices(self, args);
 }
-int quisk_midi_cwkey = 0;
+
+void quisk_start_sound_pulseaudio(struct sound_dev **pCapture, struct sound_dev **pPlayback)
+{
+	struct sound_dev * pDev;
+	const char * msg = "No driver support for this device";
+
+	while (*pCapture) {
+		pDev = *pCapture++;
+		if (pDev->driver == DEV_DRIVER_PULSEAUDIO) {
+			strMcpy(pDev->dev_errmsg, msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				QuiskPrintf("%s\n", msg);
+		}
+	}
+	while (*pPlayback) {
+		pDev = *pPlayback++;
+		if (pDev->driver == DEV_DRIVER_PULSEAUDIO) {
+			strMcpy(pDev->dev_errmsg, msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				QuiskPrintf("%s\n", msg);
+		}
+	}
+}
+
+int quisk_read_pulseaudio(struct sound_dev *dev, complex double *cSamples)
+{
+	return 0;
+}
+
+void quisk_play_pulseaudio(struct sound_dev *dev, int nSamples, complex double *cSamples, int report_latency, double volume)
+{}
+
+void quisk_close_sound_pulseaudio() 
+{}
+
+void quisk_cork_pulseaudio(struct sound_dev *dev, int b) 
+{}
+
+void quisk_flush_pulseaudio(struct sound_dev *dev) 
+{}
 #endif

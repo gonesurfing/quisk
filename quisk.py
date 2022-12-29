@@ -1,6 +1,6 @@
-#! /usr/bin/python
+#!/usr/bin/env python3
 
-# All QUISK software is Copyright (C) 2006-2020 by James C. Ahlstrom.
+# All QUISK software is Copyright (C) 2006-2021 by James C. Ahlstrom.
 # This free software is licensed for use under the GNU General Public
 # License (GPL), see http://www.opensource.org.
 # Note that there is NO WARRANTY AT ALL.  USE AT YOUR OWN RISK!!
@@ -26,7 +26,7 @@ if sys.path[0] != '':		# Make sure the current working directory is on path
   sys.path.insert(0, '')
 #print ('getcwd', os.getcwd())
 
-import wx, wx.html, wx.lib.stattext, wx.lib.colourdb, wx.grid, wx.richtext
+import wx, wx.html, wx.lib.stattext, wx.lib.colourdb, wx.grid
 import math, cmath, time, traceback, string, select, subprocess
 import threading, pickle, webbrowser, json
 try:
@@ -38,6 +38,11 @@ from quisk_widgets import *
 from filters import Filters
 import dxcluster
 import configure
+import quisk_conf_defaults as conf
+import quisk_wdsp
+
+for name in configure.name2format:      # Add defaults. These may be overwritten by a user config file.
+  setattr(conf, name, configure.name2format[name][1])
 
 DEBUGSHELL = False
 if DEBUGSHELL:
@@ -58,6 +63,71 @@ if sys.version_info.major > 2:
   Q3StringTypes = str
 else:
   Q3StringTypes = (str, unicode)
+
+class StdOutput(wx.Frame):
+  def __init__(self, app):
+    self.app = app
+    self.ctrl = None
+    self.old_stdout = sys.stdout
+    self.old_stderr = sys.stderr
+    self.old_excepthook = sys.excepthook
+    self.path = os.path.join(app.QuiskFilesDir, "quisk_logfile.txt")
+    try:
+      size = os.path.getsize(self.path)
+    except:
+      size = 0
+    if size > 10000:
+      try:
+        fp = open(self.path, 'r')
+        lines = fp.readlines()
+        fp.close()
+        fp = open(self.path, 'w')
+        for i in range(len(lines) // 2, len(lines)):
+          fp.write(lines[i])
+        fp.close()
+      except:
+        pass
+    try:
+      self.fp = open(self.path, "a", buffering=1, encoding='utf-8', errors='replace', newline=None)
+    except:
+      self.fp = None
+    sys.stdout = self
+    sys.stderr = self
+    sys.excepthook = self.ExceptHook
+    if self.fp:
+      self.fp.write("\n\n*** Quisk started on %s at %s\n" % (sys.platform, time.asctime()))
+  def Create(self, parent):
+    w = self.app.screen_width * 4 // 10
+    h = self.app.screen_height * 4 // 10
+    title = "Quisk Log File %s" % self.path
+    wx.Frame.__init__(self, parent, -1, title, size = (w, h), style=wx.DEFAULT_FRAME_STYLE)
+    self.ctrl = wx.TextCtrl(self, style=wx.TE_MULTILINE|wx.TE_READONLY|wx.HSCROLL)
+    self.Bind(wx.EVT_SIZE, self.OnSize)
+    self.Bind(wx.EVT_CLOSE, self.OnBtnClose)
+    self.ctrl.write("*** Quisk started on %s at %s\n" % (sys.platform, time.asctime()))
+  def OnSize(self, event):
+    event.Skip()
+    w, h = self.GetClientSize()
+    self.ctrl.SetSize(w, h)
+  def OnBtnClose(self, event):
+    self.Show(False)
+  def Logfile(self, text):
+    if self.fp:
+      self.fp.write(text)
+      self.fp.write("\n")
+  def write(self, text):
+    if self.fp:
+      self.fp.write(text)
+    if self.old_stdout:
+      self.old_stdout.write(text)
+    if self.ctrl:
+      self.ctrl.write(text)
+  def flush(self):
+    pass
+  def ExceptHook(self, typ, value, traceb):
+    self.Show(True)
+    self.Raise()
+    self.old_excepthook(typ, value, traceb)
 
 # Command line parsing: be able to specify the config file.
 from optparse import OptionParser
@@ -113,7 +183,7 @@ else:
   if not ConfigPath:
     ConfigPath = os.path.join(DefaultConfigDir, ".quisk_conf.py")
 
-# These FFT sizes have multiple small factors, and are prefered for efficiency.  FFT size must be an even number.
+# These FFT sizes have multiple small factors, and are preferred for efficiency.  FFT size must be an even number.
 fftPreferedSizes = []
 for f2 in range(1, 13):
   for y in (1, 3, 5, 7, 9, 11, 13, 15):
@@ -216,16 +286,52 @@ class Timer:
 class HamlibHandlerSerial:
   "Create a serial port for Hamlib control that emulates the FlexRadio PowerSDR 2.x command set."
   # This implements some Kenwood TS-2000 commands, but it is far from complete.
+  # See http://k5fr.com/binary/CatCommandReferenceGuide.pdf
+  # Test on Linux using putty.
+
+  # Additional logic contributed by Dr. Karsten Schmidt
+
   Mo2CoKen = {'CWL':7, 'CWU':3, 'LSB':1, 'USB':2, 'AM':5, 'FM':4, 'DGT-U':9, 'DGT-L':6, 'DGT-FM':4, 'DGT-IQ':9}
   Co2MoKen = {1:'LSB', 2:'USB', 3:'CWU', 4:'FM', 5:'AM', 6:'DGT-L', 7:'CWL', 9:'DGT-U'}
   Mo2CoFlex = {'CWL':3, 'CWU':4, 'LSB':0, 'USB':1, 'AM':6, 'FM':5, 'DGT-U':7, 'DGT-L':9, 'DGT-FM':5, 'DGT-IQ':7}
   Co2MoFlex = {0:'LSB', 1:'USB', 3:'CWL', 4:'CWU', 5:'FM', 6:'AM', 7:'DGT-U', 9:'DGT-L'}
+  ConvertZZAC_P1_2_Step = { 0:     1,
+                          1:    10,
+                          2:    50,
+                          3:   100,
+                          4:   250,
+                          5:    500,
+                          6:   1000,
+                          7:   5000,
+                          8:   9000,
+                          9:   10000,
+                         10:   100000,
+                         11:   250000,
+                         12:   500000,
+                         13:  1000000,
+                         14: 10000000}
+  ConvertZZAC_Step_2_P1 = {         1:  0,
+                                 10:  1,
+                                 50:  2,
+                                100:  3,
+                                250:  4,
+                                500:  5,
+                              1000:  6,
+                              5000:  7,
+                              9000:  8,
+                             10000:  9,
+                            100000: 10,
+                            250000: 11,
+                            500000: 12,
+                          1000000: 13,
+                         10000000: 14}
   def __init__(self, app, public_name):
     self.app = app
     self.port = None
     self.received = ''
     self.radio_id = '019'
     self.public_name = public_name	# the public name for the serial port
+    self.tune_step = 1000
     if sys.platform == 'win32':
       try:
         import serial
@@ -331,12 +437,76 @@ class HamlibHandlerSerial:
       r, w, x = select.select((), (self.port,), (), 0)
       if w:
         os.write(self.port, data)
+  def set_frequency(self, freq):
+    tune = freq - self.app.VFO
+    d = self.app.sample_rate * 45 // 100
+    if -d <= tune <= d:  # Frequency is on-screen
+      vfo = self.app.VFO
+    else:  # Change the VFO
+      vfo = (freq // 5000) * 5000 - 5000
+      tune = freq - vfo
+    self.app.BandFromFreq(freq)
+    self.app.ChangeHwFrequency(tune, vfo, 'FreqEntry')
+    if HAMLIB_DEBUG: print("New Freq rx,tx", self.app.txFreq + self.app.VFO, self.app.rxFreq + self.app.VFO)
+  def ZZAC(self, cmd, data, length):  # Set or read tune steps
+    if length == 0:
+      xxx = self.ConvertZZAC_Step_2_P1.get(self.tune_step)
+      self.Write("%s%02d;" % (cmd, xxx))
+    elif length == 2:
+      p1 = int(data, base=10)
+      try:
+        self.tune_step = self.ConvertZZAC_P1_2_Step.get(p1)
+      except:
+        self.Error(cmd, data)
+    else:
+      self.Error(cmd, data)
+  def ZZAD(self, cmd, data, length):  # VFO A down by a selected step
+    if length == 0:
+      oldfreq = self.app.rxFreq + self.app.VFO
+      freq = oldfreq - self.tune_step
+      self.set_frequency(freq)
+    else:
+      self.Error(cmd, data)
   def AG(self, cmd, data, length):	# audio gain
     if length == 1:
       self.Write("%s%s120;" % (cmd, data[0]))
   def ZZAG(self, cmd, data, length):	# audio gain
     if length == 0:
-      self.Write("%s050;" % cmd)
+      n = (self.app.volumeAudio + 5) / 10
+      self.Write("%s%03d;" % (cmd, n))
+    elif length == 3:
+      vol = int(data, base=10) * 10
+      self.app.sliderVol.SetValue(vol)
+      self.app.ChangeVolume()
+    else:
+      self.Error(cmd, data)
+  def ZZAU(self, cmd, data, length):  # VFO A up by a selected step
+    if length == 0:
+      oldfreq = self.app.rxFreq + self.app.VFO
+      freq = oldfreq + self.tune_step
+      self.set_frequency(freq)
+    else:
+      self.Error(cmd, data)
+  def ZZBS(self, cmd, data, length):	# band switch
+    if length == 0:
+      band = self.app.lastBand
+      try:
+        band = int(band, base=10)
+        self.Write("%s%03d;" % (cmd, band))
+      except:
+        self.Write("%s888;" % cmd)
+    elif length == 3:
+      band = data
+      if band[0] == '0':
+        band = band[1:]
+      if band[0] == '0':
+        band = band[1:]
+      try:
+        self.app.bandBtnGroup.SetLabel(band, do_cmd=True, direction=0)
+      except:
+        self.Error(cmd, data)
+    else:
+      self.Error(cmd, data)
   def ZZAI(self, cmd, data, length):	# broadcast changes
     if length == 0:
       self.Write("%s0;" % cmd)
@@ -349,16 +519,7 @@ class HamlibHandlerSerial:
       self.Write("%s%011d;" % (cmd, self.app.rxFreq + self.app.VFO))
     elif length == 11:
       freq = int(data, base=10)
-      tune = freq - self.app.VFO
-      d = self.app.sample_rate * 45 // 100
-      if -d <= tune <= d:	# Frequency is on-screen
-        vfo = self.app.VFO
-      else:					# Change the VFO
-        vfo = (freq // 5000) * 5000 - 5000
-        tune = freq - vfo
-      self.app.BandFromFreq(freq)
-      self.app.ChangeHwFrequency(tune, vfo, 'FreqEntry')
-      if HAMLIB_DEBUG: print ("New Freq rx,tx", self.app.txFreq + self.app.VFO, self.app.rxFreq + self.app.VFO)
+      self.set_frequency(freq)
     else:
       self.Error(cmd, data)
   def ZZFB(self, cmd, data, length):	# frequency of VFO B
@@ -447,7 +608,7 @@ class HamlibHandlerSerial:
     elif length == 1:
       code = int(data, base=10)
       mode = self.Co2MoKen.get(code, 'USB')
-      self.app.OnBtnMode(None, mode)		# Set mode
+      self.app.modeButns.SetLabel(mode, True)		# Set mode
     else:
       self.Error(cmd, data)
   def ZZMD(self, cmd, data, length):	# the mode; USB, CW, etc.
@@ -458,7 +619,7 @@ class HamlibHandlerSerial:
     elif length == 2:
       code = int(data, base=10)
       mode = self.Co2MoFlex.get(code, 'USB')
-      self.app.OnBtnMode(None, mode)	# Set mode
+      self.app.modeButns.SetLabel(mode, True)		# Set mode
     else:
       self.Error(cmd, data)
   def ZZMU(self, cmd, data, length):	# MultiRx on/off
@@ -529,8 +690,8 @@ class HamlibHandlerSerial:
     else:
       self.Error(cmd, data)
 
-class HamlibHandlerRig2:
-  """This class is created for each connection to the server.  It services requests from each client"""
+class HamlibHandlerRig2:	# Test with telnet localhost 4532
+  """This class is created for each connection to the server.  It services requests from each client."""
   SingleLetters = {		# convert single-letter commands to long commands
     '_':'info',
     'f':'freq',
@@ -543,62 +704,6 @@ class HamlibHandlerRig2:
     'u':'func',
     'v':'vfo',
     }
-# I don't understand the need for dump_state, nor what it means.
-# A possible response to the "dump_state" request:
-  dump1 = """ 2
-2
-2
-150000.000000 1500000000.000000 0x1ff -1 -1 0x10000003 0x3
-0 0 0 0 0 0 0
-0 0 0 0 0 0 0
-0x1ff 1
-0x1ff 0
-0 0
-0x1e 2400
-0x2 500
-0x1 8000
-0x1 2400
-0x20 15000
-0x20 8000
-0x40 230000
-0 0
-9990
-9990
-10000
-0
-10 
-10 20 30 
-0x3effffff
-0x3effffff
-0x7fffffff
-0x7fffffff
-0x7fffffff
-0x7fffffff
-"""
-
-# Another possible response to the "dump_state" request:
-  dump2 = """ 0
-2
-2
-150000.000000 30000000.000000  0x900af -1 -1 0x10 000003 0x3
-0 0 0 0 0 0 0
-150000.000000 30000000.000000  0x900af -1 -1 0x10 000003 0x3
-0 0 0 0 0 0 0
-0 0
-0 0
-0
-0
-0
-0
-
-
-0x0
-0x0
-0x0
-0x0
-0x0
-0
-"""
   def __init__(self, app, sock, address):
     self.app = app		# Reference back to the "hardware"
     self.sock = sock
@@ -606,6 +711,10 @@ class HamlibHandlerRig2:
     self.address = address
     self.params = ''	# params is the string following the command
     self.received = ''
+    self.input = ''
+    self.vfo = "Main"
+    self.split_mode = 0
+    self.split_vfo = 'VFO'
     h = self.Handlers = {}
     h[''] = self.ErrProtocol
     h['dump_state']	= self.DumpState
@@ -616,6 +725,7 @@ class HamlibHandlerRig2:
     h['get_mode']	= self.GetMode
     h['set_mode']	= self.SetMode
     h['get_vfo']	= self.GetVfo
+    h['set_vfo']	= self.SetVfo
     h['get_func']	= self.GetFunc
     h['set_func']	= self.SetFunc
     h['get_level']	= self.GetLevel
@@ -695,6 +805,7 @@ class HamlibHandlerRig2:
     dump_state.append( b"0xffffffffffffffbf" )
     # END
     self.dump_state = b'\n'.join(dump_state)
+    self.dump_state += b'\n'
   def Send(self, text):
     """Send text back to the client."""
     if isinstance(text, Q3StringTypes):
@@ -706,8 +817,10 @@ class HamlibHandlerRig2:
       self.sock = None
   def Reply(self, *args):	# args is name, value, name, value, ..., int
     """Create a string reply of name, value pairs, and an ending integer code."""
-    if self.extended:			# Use extended format
-      t = "%s: %s" % (self.cmd, self.params)		# Extended format echoes the command and parameters
+    if self.extended:	# Use extended format; echo the command and parameters.
+      t = "%s:" % self.command
+      if self.params:
+        t += " %s" % self.params
       t += self.extended
       for i in range(0, len(args) - 1, 2):
         t = "%s%s: %s%c" % (t, args[i], args[i+1], self.extended)
@@ -718,21 +831,78 @@ class HamlibHandlerRig2:
         t = "%s%s\n" % (t, args[i])
     else:		# No names; just the required integer code
       t = "RPRT %d\n" % args[0]
-    # print 'Reply', t
     self.Send(t)
+  def Reply2(self, text, code):
+    """Create a reply string in a different format."""
+    if self.extended:			# Use extended format
+      t = "%s: %s%s%s\nRPRT %d\n" % (self.command, self.params, self.extended, text, code)
+      self.Send(t)
+    else:
+      if self.command[0:4] == "set_":
+        self.Send("%s\nRPRT %d\n" % (text, code))
+      else:
+        self.Send("%s\n" % text)
   def ErrParam(self):		# Invalid parameter
+    self.input = ''
     self.Reply(-1)
   def UnImplemented(self):	# Command not implemented
+    self.input = ''
     self.Reply(-4)
   def ErrProtocol(self):	# Protocol error
+    self.input = ''
     self.Reply(-8)
+  def GetParamNumber(self):
+    if not self.input:
+      return None
+    number = ''
+    for i in range(len(self.input)):
+      ch = self.input[i]
+      if ch in "+-.0123456789":
+        number = number + ch
+      else:
+        self.input = self.input[i:].strip()
+        break
+    else:
+      self.input = ''
+    if self.params:
+      self.params = self.params + ' ' + number
+    else:
+      self.params = number
+    try:
+      if '.' in number:
+        return float(number)
+      else:
+        return int(number)
+    except:
+      return None
+  def GetParamName(self):
+    if not self.input:
+      return ''
+    if self.input[0] == '?':
+      self.params = '?'
+      self.input = self.input[1:].strip()
+      return '?'
+    name = ''
+    for i in range(len(self.input)):
+      ch = self.input[i]
+      if ch in string.ascii_letters or ch in "_-":
+        name = name + ch
+      else:
+        self.input = self.input[i:].strip()
+        break
+    else:
+      self.input = ''
+    if self.params:
+      self.params = self.params + ' ' + name
+    else:
+      self.params = name
+    return name
   def Process(self):
     """This is the main processing loop, and is called frequently.  It reads and satisfies requests."""
     if not self.sock:
       return 0
     try:	# Read any data from the socket
       text = self.sock.recv(1024)
-      # print('Text', text)
     except socket.timeout:	# This does not work
       pass
     except socket.error:	# Nothing to read
@@ -742,95 +912,110 @@ class HamlibHandlerRig2:
         text = text.decode('utf-8')
       self.received += text
     if '\n' in self.received:	# A complete command ending with newline is available
-      cmd, self.received = self.received.split('\n', 1)	# Split off the command, save any further characters
+      self.input, self.received = self.received.split('\n', 1)	# Split off the command, save any further characters
     else:
       return 1
-    cmd = cmd.strip()		# Here is our command
-    if not cmd:			# ??? Indicates a closed connection?
-      # print 'empty command'
-      self.sock.close()
-      self.sock = None
-      return 0
-    # Parse the command and call the appropriate handler
-    if cmd[0] == '+':			# rigctld Extended Response Protocol
-      self.extended = '\n'
-      cmd = cmd[1:].strip()
-    elif cmd[0] in ';|,':		# rigctld Extended Response Protocol
-      self.extended = cmd[0]
-      cmd = cmd[1:].strip()
-    else:
-      self.extended = None
-    if cmd[0:1] == '\\':		# long form command starting with backslash
-      args = cmd[1:].split(None, 1)
-      self.cmd = args[0]
-      if len(args) == 1:
-        self.params = ''
+    self.input = self.input.strip()		# Here is our command line
+    while self.input:
+      # Parse the commands and call the appropriate handlers
+      self.params = ''
+      if self.input[0] == '+':			# rigctld Extended Response Protocol
+        self.extended = '\n'
+        self.input = self.input[1:].strip()
+      elif self.input[0] in ';|,':		# rigctld Extended Response Protocol
+        self.extended = self.input[0]
+        self.input = self.input[1:].strip()
       else:
-        self.params = args[1]
-      self.Handlers.get(self.cmd, self.UnImplemented)()
-    else:						# single-letter command
-      self.params = cmd[1:].strip()
-      cmd = cmd[0:1]
-      if cmd in 'Qq':	# Quit command
-        return 0
-      try:
-        t = self.SingleLetters[cmd.lower()]
-      except KeyError:
-        self.UnImplemented()
-      else:
-        if cmd in string.ascii_uppercase:
-          self.cmd = 'set_' + t
+        self.extended = None
+      letter = self.input[0:1]
+      if letter == '\\':		# long form command starting with backslash
+        args = self.input[1:].split(None, 1)
+        self.command = args[0]
+        if len(args) == 1:
+          self.input = ''
         else:
-          self.cmd = 'get_' + t
-        self.Handlers.get(self.cmd, self.UnImplemented)()
+          self.input = args[1].strip()
+      else:		# single-letter commands
+        self.input = self.input[1:].strip()
+        if letter in 'Qq':	# Quit command
+          self.sock.close()
+          self.input = ''
+          return 0
+        try:
+          command = self.SingleLetters[letter.lower()]
+        except KeyError:
+          self.UnImplemented()
+          return 1
+        else:
+          if letter in string.ascii_uppercase:
+            self.command = 'set_' + command
+          else:
+            self.command = 'get_' + command
+      self.Handlers.get(self.command, self.UnImplemented)()
     return 1
   # These are the handlers for each request
   def DumpState(self):
     self.Send(self.dump_state)
   def ChkVfo(self):
-    self.Send('CHKVFO 0')
-  def GetFreq(self):
-    self.Reply('Frequency', self.app.rxFreq + self.app.VFO, 0)
-  def SetFreq(self):
+    if self.extended:
+      self.Send('ChkVFO: 0\n')
+    else:
+      self.Send('0\n')
+  def GetFreq(self):	# The Rx frequency
+    rx = self.app.multi_rx_screen.receiver_list
+    if rx:
+      rx = rx[0]
+      self.Reply('Frequency', rx.txFreq + rx.VFO, 0)
+    else:
+      self.Reply('Frequency', self.app.rxFreq + self.app.VFO, 0)
+  def SetFreq(self):	# The Rx frequency
+    freq = self.GetParamNumber()
     try:
-      freq = float(self.params)
+      freq = float(freq)
       self.Reply(0)
     except:
       self.ErrParam()
     else:
       freq = int(freq + 0.5)
-      self.app.ChangeRxTxFrequency(freq, None)
-  def GetSplitFreq(self):
-    self.Reply('TX Frequency', self.app.txFreq + self.app.VFO, 0)
-  def SetSplitFreq(self):
-    try:
-      freq = float(self.params)
-      self.Reply(0)
-    except:
-      self.ErrParam()
-    else:
-      freq = int(freq + 0.5)
-      if self.app.split_rxtx and not self.app.split_hamlib_tx:
-        self.app.ChangeRxTxFrequency(freq, None)
+      # For multiple receivers this controls the first added receiver frequency; else it controls split Rx/Tx frequency.
+      rx = self.app.multi_rx_screen.receiver_list
+      if rx:
+        rx[0].ChangeRxTxFrequency(freq)
       else:
-        self.app.ChangeRxTxFrequency(None, freq)
-  def GetSplitVfo(self):
-    # I am not sure if "VFO" is a suitable response
-    if self.app.split_rxtx:
-      self.Reply('Split', 1, 'TX VFO', 'VFO', 0)
-    else:
-      self.Reply('Split', 0, 'TX VFO', 'VFO', 0)
-  def SetSplitVfo(self):
-    # Currently (Aug 2012) hamlib fails to send the "split" parameter, so this fails
+        self.app.ChangeRxTxFrequency(freq, None)
+  def GetSplitFreq(self):	# The Tx Frequency
+    self.Reply('TX Frequency', self.app.txFreq + self.app.VFO, 0)
+  def SetSplitFreq(self):	# The Tx Frequency
+    freq = self.GetParamNumber()
     try:
-      split, vfo = self.params.split()
+      freq = float(freq)
+      self.Reply(0)
+    except:
+      self.ErrParam()
+    else:
+      freq = int(freq + 0.5)
+      # This always controls the Tx frequency
+      self.app.ChangeRxTxFrequency(None, freq)
+  def GetSplitVfo(self):
+    self.Reply('Split', self.split_mode, 'TX VFO', self.split_vfo, 0)
+  def SetSplitVfo(self):
+    split = self.GetParamNumber()
+    vfo = self.GetParamName()
+    try:
       split = int(split)
       self.Reply(0)
     except:
       # traceback.print_exc()
       self.ErrParam()
     else:
-      self.app.splitButton.SetValue(split, True)
+      self.split_mode = split
+      if split:
+        self.split_vfo = vfo
+      else:
+        self.split_vfo = 'VFO'
+      # If there are no multi receivers, this sets split Rx/Tx mode.
+      if not self.app.multi_rx_screen.receiver_list:	
+        self.app.splitButton.SetValue(split, True)
   def GetInfo(self):
     self.Reply("Info", self.app.main_frame.title, 0)
   def GetMode(self):
@@ -849,9 +1034,13 @@ class HamlibHandlerRig2:
       mode = 'PKTUSB'
     self.Reply('Mode', mode, 'Passband', self.app.filter_bandwidth, 0)
   def SetMode(self):
+    mode = self.GetParamName()
+    bw = self.GetParamNumber()
+    if mode == '?':	# send back supported parameters
+      self.Reply2('USB LSB AM FM CW CWR PKTUSB PKTLSB PKTFM', 0)
+      return
     try:
-      mode, bw = self.params.split()
-      bw = int(float(bw) + 0.5)
+      bw = int(bw)
     except:
       self.ErrParam()
       return
@@ -877,7 +1066,7 @@ class HamlibHandlerRig2:
     else:
       self.ErrParam()
       return
-    self.app.OnBtnMode(None, mode)		# Set mode
+    self.app.modeButns.SetLabel(mode, True)		# Set mode
     if bw <= 0:		# use default bandwidth
       return
     # Choose button closest to requested bandwidth
@@ -890,59 +1079,78 @@ class HamlibHandlerRig2:
       if df < diff:
         Lab = label
         diff = df
-    self.app.OnBtnFilter(None, int(Lab))
+    self.app.filterButns.SetLabel(Lab, True)
   def GetVfo(self):
-    self.Reply('VFO', "VFO", 0)		# The type of VFO we have
+    self.Reply('VFO', self.vfo, 0)
+  def SetVfo(self):
+    name = self.GetParamName()
+    if name == '?':	# send back supported parameters
+      self.Reply2('Main', 0)
+    else:
+      self.vfo = name
+      self.Reply(0)
   def GetPtt(self):
     if QS.is_key_down():
       self.Reply('PTT', 1, 0)
     else:
       self.Reply('PTT', 0, 0)
   def SetPtt(self):
+    ptt = self.GetParamNumber()
     try:
-      ptt = int(self.params)
+      ptt = int(ptt)
       self.Reply(0)
     except:
       self.ErrParam()
     else:
       self.app.pttButton.SetValue(ptt, True)
-  def GetNameValue(self):
-    if self.params[0] == '?':
-      return '?', ''
-    args = self.params.split(None, 1)
-    if len(args) == 1:
-      return args[0], ''
-    return args[0], args[1]
   def GetFunc(self):
-    name, value = self.GetNameValue()
-    if name == '?':	# send back supported boolean functions
-      self.Reply('? Status', '', 0)
+    name = self.GetParamName()
+    if name == '?':	# send back supported functions
+      self.Reply2('TUNER', 0)
+    elif name == 'TUNER':
+      if self.app.spotButton.GetValue():
+        self.Reply2(1, 0)
+      else:
+        self.Reply2(0, 0)
     else:
       self.ErrParam()
   def SetFunc(self):
-    name, value = self.GetNameValue()
-    if name == '?':	# send back supported boolean functions
-      self.Reply('? Status', '', 0)
+    name = self.GetParamName()
+    value = self.GetParamNumber()
+    if name == '?':	# send back supported functions
+      self.Reply2('TUNER', 0)
+    elif name == 'TUNER':
+      try:
+        value = int(value)
+      except:
+        self.ErrParam()
+      else:
+        self.Reply(0)
+        if value:
+          self.app.spotButton.SetValue(1, True)
+        else:
+          self.app.spotButton.SetValue(0, True)
     else:
       self.ErrParam()
   def GetLevel(self):
-    name, value = self.GetNameValue()
+    name = self.GetParamName()
     if name == '?':	# send back supported parameters
-      self.Reply('? Value', 'AGC AF', 0)
+      self.Reply2('AGC AF', 0)
     elif name == 'AGC':
       if self.app.BtnAGC.GetValue():
-        self.Reply(name + ' Value', 4, 0)
+        self.Reply2(4, 0)
       else:
-        self.Reply(name + ' Value', 0, 0)
+        self.Reply2(0, 0)
     elif name == 'AF':
       x = self.app.audio_volume	# audio_volume is 0 to 1.000
-      self.Reply(name + ' Value', "%.5f" % x, 0)
+      self.Reply2("%.5f" % x, 0)
     else:
       self.ErrParam()
   def SetLevel(self):
-    name, value = self.GetNameValue()
+    name = self.GetParamName()
+    value = self.GetParamNumber()
     if name == '?':	# send back supported parameters
-      self.Reply('? Value', 'AGC AF', 0)
+      self.Reply2('AGC AF', 0)
     elif name == 'AGC':
       try:
         value = int(value)
@@ -967,15 +1175,15 @@ class HamlibHandlerRig2:
     else:
       self.ErrParam()
   def GetParm(self):
-    name, value = self.GetNameValue()
+    name = self.GetParamName()
     if name == '?':	# send back supported parameters
-      self.Reply('? Value', '', 0)
+      self.Reply2('', 0)
     else:
       self.ErrParam()
   def SetParm(self):
-    name, value = self.GetNameValue()
+    name = self.GetParamName()
     if name == '?':	# send back supported parameters
-      self.Reply('? Value', '', 0)
+      self.Reply2('', 0)
     else:
       self.ErrParam()
 
@@ -984,8 +1192,7 @@ class SoundThread(threading.Thread):
   def __init__(self, samples_from_python):
     self.samples_from_python = samples_from_python
     self.do_init = 1
-    self.config_text = ''
-    threading.Thread.__init__(self)
+    threading.Thread.__init__(self, name="QuiskSound")
     self.doQuit = threading.Event()
     self.doQuit.clear()
     #self.time0 = time.time()
@@ -997,11 +1204,9 @@ class SoundThread(threading.Thread):
     """Read, process, play sound; then notify the GUI thread to check for FFT data."""
     if self.do_init:	# Open sound using this thread
       self.do_init = 0
-      if self.samples_from_python:
-        self.config_text = Hardware.StartSamples()
       QS.start_sound()
       wx.CallAfter(application.PostStartup)
-    while not self.doQuit.isSet():
+    while not self.doQuit.is_set():
       #tm = time.time()
       #print ("Quisk thread %12.3f" % ((tm - self.time0) * 1E3))
       #self.time0 = tm
@@ -1012,13 +1217,14 @@ class SoundThread(threading.Thread):
       if self.poll_cw:
         Hardware.PollCwKey()
       if conf.midi_cwkey_device:
-        QS.control_midi(get_event=1)
+        byts = QS.control_midi(get_event=1)
+        if byts:
+          wx.CallAfter(application.OnReadMIDI, byts)
+      application.wdsp.control()
       QS.read_sound()
       wx.CallAfter(application.OnReadSound)
       #if sys.platform == 'win32':
       #  time.sleep(0.000)
-    if self.samples_from_python:
-      Hardware.StopSamples()
     QS.control_midi(close_port=1)
     QS.close_sound()
   def stop(self):
@@ -1048,13 +1254,13 @@ class ConfigScreen(wx.Panel):
     notebook.bg_color = self.status.bg_color
     notebook.tfg_color = self.status.tfg_color
     notebook.AddPage(self.status, "Status")
-    self.config = ConfigConfig(notebook, width)
+    self.config = configure.ConfigConfig(notebook, width)
     notebook.AddPage(self.config, "Config")
     self.favorites = ConfigFavorites(notebook, width)
     notebook.AddPage(self.favorites, "Favorites")
-    self.tx_audio = ConfigTxAudio(notebook, width)
-    notebook.AddPage(self.tx_audio, "Tx Audio")
-    self.tx_audio.status = self.status
+    tx_audio = configure.ConfigTxAudio(notebook)
+    notebook.AddPage(tx_audio, "Tx Audio")
+    tx_audio.status = self.status
   def FinishPages(self):
     if self.finish_pages:
       self.finish_pages = False
@@ -1069,14 +1275,13 @@ class ConfigScreen(wx.Panel):
     pass
   def OnGraphData(self, data=None):
     self.status.OnGraphData(data)
-    self.tx_audio.OnGraphData(data)
   def InitBitmap(self):		# Initial construction of bitmap
     self.status.InitBitmap()
 
-class ConfigStatus(wx.ScrolledWindow):
+class ConfigStatus(wx.ScrolledCanvas):
   """Display the status screen."""
   def __init__(self, parent, width, fft_size):
-    wx.ScrolledWindow.__init__(self, parent)
+    wx.ScrolledCanvas.__init__(self, parent)
     self.Bind(wx.EVT_PAINT, self.OnPaint)
     self.bg_color = self.GetBackgroundColour()
     try:
@@ -1087,7 +1292,7 @@ class ConfigStatus(wx.ScrolledWindow):
     self.width = width
     self.fft_size = fft_size
     self.scroll_height = None
-    self.interupts = 0
+    self.interrupts = 0
     self.read_error = -1
     self.write_error = -1
     self.underrun_error = -1
@@ -1101,7 +1306,7 @@ class ConfigStatus(wx.ScrolledWindow):
     self.rate_max = -1
     self.chan_min = -1
     self.chan_max = -1
-    self.mic_max_display = 0
+    self.mic_max_display = -90.0
     self.err_msg = "No response"
     self.msg1 = ""
     self.font = wx.Font(conf.status_font_size, wx.FONTFAMILY_SWISS, wx.NORMAL,
@@ -1187,17 +1392,15 @@ class ConfigStatus(wx.ScrolledWindow):
     if conf.config_file_exists:
       cfile = "Configuration file:  %s" % conf.config_file_path
     else:
-      cfile = "Quisk user files are in %s" % application.QuiskFilesDir
-    if conf.microphone_name:
-      level = "%3.0f" % self.mic_max_display
-    else:
-      level = "None"
+      cfile = "Configuration file:  None"
+    qfile = "Quisk user files are in %s" % application.QuiskFilesDir
+    level = "%3.0f" % self.mic_max_display
     if self.err_msg:
       err_msg = self.err_msg
     else:
       err_msg = None
-    self.MakeRow2("Sample interrupts", self.interupts, cfile)
-    self.MakeRow2("Microphone or DGT level dB", level, application.config_text)
+    self.MakeRow2("Sample interrupts", self.interrupts, cfile)
+    self.MakeRow2("Microphone or DGT level dB", level, qfile)
     self.MakeRow2("FFT number of points", self.fft_size, err_msg)
     if conf.dxClHost:		# connection to dx cluster
       nSpots = len(application.dxCluster.dxSpots)
@@ -1248,219 +1451,11 @@ class ConfigStatus(wx.ScrolledWindow):
     (self.rate_min, self.rate_max, sample_rate, self.chan_min, self.chan_max,
          self.msg1, self.unused, self.err_msg,
          self.read_error, self.write_error, self.underrun_error,
-         self.latencyCapt, self.latencyPlay, self.interupts, self.fft_error, self.mic_max_display,
+         self.latencyCapt, self.latencyPlay, self.interrupts, self.fft_error, self.mic_max_display,
          self.data_poll_usec
      ) = QS.get_state()
     self.mic_max_display = 20.0 * math.log10((self.mic_max_display + 1) / 32767.0)
     self.RefreshRect(self.mem_rect)
-
-class ConfigConfig(wx.ScrolledWindow):
-  def __init__(self, parent, width):
-    wx.ScrolledWindow.__init__(self, parent)
-    self.width = width
-    self.font = wx.Font(conf.config_font_size, wx.FONTFAMILY_SWISS, wx.NORMAL,
-          wx.FONTWEIGHT_NORMAL, False, conf.quisk_typeface)
-    self.SetFont(self.font)
-    self.SetBackgroundColour(parent.bg_color)
-    self.charx = charx = self.GetCharWidth()
-    self.chary = chary = self.GetCharHeight()
-    self.dy = self.chary
-    self.rx_phase = None
-    self.radio_group = None
-    # Make controls FIRST column
-    tab0 = charx * 4
-    # Receive phase
-    rx = wx.StaticText(self, -1, "Adjust receive amplitude and phase")
-    tx = wx.StaticText(self, -1, "Adjust transmit amplitude and phase")
-    x1, y1 = tx.GetSize().Get()
-    self.rx_phase = ctrl = QuiskPushbutton(self, self.OnBtnPhase, "Rx Phase...")
-    ctrl.SetColorGray()
-    if not conf.name_of_sound_capt:
-      ctrl.Enable(0)
-    x2, y2 = ctrl.GetSize().Get()
-    tab1 = tab0 + x1 + charx * 2
-    tab2 = tab1 + x2
-    tab3 = tab2 + charx * 8
-    self.y = self.yyy = y2 + self.chary
-    self.dy = y2 * 12 // 10
-    self.offset = (y2 - y1) // 2
-    rx.SetPosition((tab0, self.y))
-    ctrl.SetPosition((tab1, self.y - self.offset))
-    self.y += self.dy
-    # Transmit phase
-    self.tx_phase = ctrl = QuiskPushbutton(self, self.OnBtnPhase, "Tx Phase...")
-    ctrl.SetColorGray()
-    if not conf.name_of_mic_play:
-      ctrl.Enable(0)
-    tx.SetPosition((tab0, self.y))
-    ctrl.SetPosition((tab1, self.y - self.offset))
-    self.y += self.dy
-    # Choice (combo) box for decimation
-    lst = Hardware.VarDecimGetChoices()
-    if lst:
-      txt = Hardware.VarDecimGetLabel()
-      index = Hardware.VarDecimGetIndex()
-    else:
-      txt = "Variable decimation"
-      lst = ["None"]
-      index = 0
-    t = wx.StaticText(self, -1, txt)
-    ctrl = wx.Choice(self, -1, choices=lst, size=(x2, y2))
-    if lst:
-      self.Bind(wx.EVT_CHOICE, application.OnBtnDecimation, ctrl)
-      ctrl.SetSelection(index)
-    t.SetPosition((tab0, self.y))
-    ctrl.SetPosition((tab1, self.y - self.offset))
-    self.y += self.dy
-    # Transmit level controls
-    if hasattr(Hardware, "SetTxLevel"):
-      SliderBoxH(self, "Tx level %d%%  ", 100, 0, 100, self.OnTxLevel, True, (tab0, self.y), tab2-tab0)
-      self.y += self.dy
-      level = conf.digital_tx_level
-      SliderBoxH(self, "Digital Tx level %d%%  ", level, 0, level, self.OnDigitalTxLevel, True, (tab0, self.y), tab2-tab0)
-      self.y += self.dy
-    self.scroll_height = self.y
-    #### Make controls SECOND column
-    self.y = self.yyy
-    self.tab3 = tab3
-    self.charx = charx
-    ## Record buttons
-    self.st = st = wx.StaticText(self, -1, "The file-record button will:", pos=(tab3 - charx * 2, self.y))
-    self.dy = st.GetSize().GetHeight() * 14 // 10
-    self.y += self.dy
-    # File for recording speaker audio
-    text = "Record Rx audio to WAV file "
-    path = application.file_name_rec_audio
-    self.file_button_rec_speaker = self.MakeFileButton(text, path, 0, 'rec_audio')
-    # File for recording samples
-    text = "Record I/Q samples to WAV file "
-    path = application.file_name_rec_samples
-    self.file_button_rec_iq = self.MakeFileButton(text, path, 1, 'rec_samples')
-    # File for recording the microphone
-    text = "Record the mic to make a CQ message"
-    path = application.file_name_rec_mic
-    self.file_button_rec_mic = self.MakeFileButton(text, path, 2, 'rec_mic')
-    ## Play buttons
-    wx.StaticText(self, -1, "The file-play button will:", pos=(tab3 - charx * 2, self.y))
-    self.y += self.dy
-    # File for playing speaker audio
-    text = "Play Rx audio from a WAV file"
-    path = application.file_name_play_audio
-    self.file_button_play_speaker = self.MakeFileButton(text, path, 10, 'play_audio')
-    # file for playing samples
-    text = "Receive saved I/Q samples from a file"
-    path = application.file_name_play_samples
-    self.file_button_play_iq = self.MakeFileButton(text, path, 11, 'play_samples')
-    # File for playing a file to the mic input for a CQ message
-    text = "Repeat a CQ message until a station answers"
-    path = application.file_name_play_cq
-    self.file_button_play_mic = self.MakeFileButton(text, path, 12, 'play_cq')
-    SliderBoxH(self, "Repeat secs %.1f  ", 0, 0, 100, self.OnPlayFileRepeat, True, (tab3 + charx * 4, self.y), tab2-tab0, 0.1)
-    self.y += self.dy
-    if self.y > self.scroll_height:
-      self.scroll_height = self.y
-    self.SetScrollbars(1, 1, 100, self.scroll_height)
-  def MakeFileButton(self, text, path, index, name):
-    if index < 10:	# record buttons
-      cb = wx.CheckBox(self, -1, text, pos=(self.tab3, self.y))
-      self.Bind(wx.EVT_CHECKBOX, self.OnCheckRecPlay, cb)
-    elif self.radio_group:
-      cb = wx.RadioButton(self, -1, text, pos=(self.tab3, self.y))
-      self.Bind(wx.EVT_RADIOBUTTON, self.OnCheckRecPlay, cb)
-    else:
-      self.radio_group = True
-      cb = wx.RadioButton(self, -1, text, pos=(self.tab3, self.y), style=wx.RB_GROUP)
-      self.Bind(wx.EVT_RADIOBUTTON, self.OnCheckRecPlay, cb)
-    x = self.tab3 + cb.GetSize().GetWidth()
-    bsz = wx.Size(self.charx * 3, cb.GetSize().GetHeight())
-    b = wx.Button(self, -1, "...", pos=(x, self.y), size=bsz)
-    b.check_box = cb
-    b.index = cb.index = index
-    b.path = cb.path = path
-    b.name = 'file_name_' + name
-    if index < 10:	# record buttons
-      if path:
-        enable = True
-      else:
-        enable = False
-    else:		# playback buttons
-      enable = os.path.isfile(path)
-    QS.set_file_name(b.index, name=path, enable=enable)
-    self.Bind(wx.EVT_BUTTON, self.OnBtnFileName, b)
-    x = x + b.GetSize().GetWidth() + self.charx
-    dddy = (cb.GetSize().GetHeight() - self.st.GetSize().GetHeight()) // 2
-    if not enable:
-      cb.Enable(False)
-      path = "(No file)"
-    b.txt_ctrl = wx.StaticText(self, -1, path, pos=(x, self.y + dddy))
-    self.y += self.dy
-    return b
-  def OnTxLevel(self, event):
-    application.tx_level = event.GetEventObject().GetValue()
-    Hardware.SetTxLevel()
-  def OnDigitalTxLevel(self, event):
-    application.digital_tx_level = event.GetEventObject().GetValue()
-    Hardware.SetTxLevel()
-  def OnBtnPhase(self, event):
-    btn = event.GetEventObject()
-    if btn.GetLabel()[0:2] == 'Tx':
-      rx_tx = 'tx'
-    else:
-      rx_tx = 'rx'
-    application.screenBtnGroup.SetLabel('Graph', do_cmd=True)
-    if application.w_phase:
-      application.w_phase.Raise()
-    else:
-      application.w_phase = QAdjustPhase(self, self.width, rx_tx)
-  def OnBtnFileName(self, event):
-    btn = event.GetEventObject()
-    dr, fn = os.path.split(btn.path)
-    if btn.index < 10:	# record buttons
-      dlg = wx.FileDialog(self, 'Choose WAV file', dr, fn, style=wx.FD_SAVE|wx.FD_OVERWRITE_PROMPT, wildcard="Wave files (*.wav)|*.wav")
-    else:
-      dlg = wx.FileDialog(self, 'Choose WAV file', dr, fn, style=wx.FD_OPEN, wildcard="Wave files (*.wav)|*.wav")
-    if dlg.ShowModal() == wx.ID_OK:
-      path = dlg.GetPath()
-      if path[-4:].lower() != '.wav':
-        path = path + '.wav'
-      QS.set_file_name(btn.index, name=path)
-      btn.txt_ctrl.SetLabel(path)
-      btn.path = path
-      setattr(application, btn.name, path)
-      btn.check_box.path = path
-      btn.check_box.Enable(True)
-      if btn.index >= 10:	# play buttons
-        btn.check_box.SetValue(True)
-        application.file_play_source = btn.index
-        QS.set_file_name(btn.index, enable=1)
-        QS.open_wav_file_play(path)
-      self.EnableRecPlay()
-    dlg.Destroy()
-  def EnableRecPlay(self):
-    enable_rec = False
-    enable_play = False
-    for btn in (self.file_button_rec_speaker, self.file_button_rec_iq, self.file_button_rec_mic):
-      if btn.check_box.GetValue():
-        enable_rec = True
-        break
-    for btn in (self.file_button_play_speaker, self.file_button_play_iq, self.file_button_play_mic):
-       if btn.check_box.GetValue() and os.path.isfile(btn.path):
-         enable_play = True
-         break
-    application.btn_file_record.Enable(enable_rec)
-    application.btnFilePlay.Enable(enable_play)
-  def OnCheckRecPlay(self, event):
-    btn = event.GetEventObject()
-    if btn.GetValue():
-      if btn.index >= 10:	# play button
-        QS.open_wav_file_play(btn.path)
-        application.file_play_source = btn.index
-      QS.set_file_name(btn.index, enable=1)
-    else:
-      QS.set_file_name(btn.index, enable=0)
-    self.EnableRecPlay()
-  def OnPlayFileRepeat(self, event):
-    application.file_play_repeat = event.GetEventObject().GetValue() * 0.1
 
 class ConfigFavorites(wx.grid.Grid):
   def __init__(self, parent, width):
@@ -1602,7 +1597,7 @@ class ConfigFavorites(wx.grid.Grid):
       pos = event.GetPosition()
       self.PopupMenu(self.popupmenu, pos)
   def OnLeftClickLabel(self, event):
-    pass
+    self.OnRightClickLabel(event)
   def OnLeftDClick(self, event):		# Thanks to Christof, DJ4CM
     self.menurow = event.GetRow()
     if self.menurow >= 0:
@@ -1653,7 +1648,7 @@ class ConfigFavorites(wx.grid.Grid):
     application.ChangeRxTxFrequency(None, freq)
     mode = self.GetCellValue(self.menurow, 2)
     mode = mode.upper()
-    application.OnBtnMode(None, mode)
+    application.modeButns.SetLabel(mode, True)
     application.screenBtnGroup.SetLabel(conf.default_screen, do_cmd=True)
   def MakeRepeaterDict(self):
     self.RepeaterDict = {}
@@ -1686,97 +1681,6 @@ class ConfigFavorites(wx.grid.Grid):
   def OnTimer(self, event):
     if self.changed:
       self.WriteOut()
-
-class ConfigTxAudio(wx.ScrolledWindow):
-  """Display controls for the transmit audio."""
-  def __init__(self, parent, width):
-    wx.ScrolledWindow.__init__(self, parent)
-    self.width = width
-    self.font = wx.Font(conf.config_font_size, wx.FONTFAMILY_SWISS, wx.NORMAL,
-          wx.FONTWEIGHT_NORMAL, False, conf.quisk_typeface)
-    self.SetFont(self.font)
-    self.SetBackgroundColour(parent.bg_color)
-    self.charx = charx = self.GetCharWidth()
-    self.chary = chary = self.GetCharHeight()
-    self.tmp_playing = False
-    # Make controls
-    tab0 = charx * 4
-    self.y = chary
-    t = "This is a test screen for transmit audio.  SSB, AM and FM have separate settings."
-    wx.StaticText(self, -1, t, pos=(tab0, self.y))
-    self.btn_record = QuiskCheckbutton(self, self.OnBtnRecord, "Record")
-    self.btn_record.SetColorGray()
-    x2, y2 = self.btn_record.GetSize().Get()
-    self.dy = y2 * 12 // 10
-    self.offset = (y2 - chary) // 2
-    self.y += self.dy
-    # Record and Playback
-    ctl = wx.StaticText(self, -1, "Listen to transmit audio", pos=(tab0, self.y))
-    x1, y1 = ctl.GetSize().Get()
-    x = tab0 + x1 + charx * 3
-    y = self.y - self.offset
-    self.btn_record.SetPosition((x, y))
-    self.btn_playback = QuiskCheckbutton(self, self.OnBtnPlayback, "Playback")
-    self.btn_playback.SetColorGray()
-    self.btn_playback.SetPosition((x + x2 + charx * 3, y))
-    self.btn_playback.Enable(0)
-    if not conf.microphone_name:
-      self.btn_record.Enable(0)
-    tab1 = x + x2
-    tab2 = tab1 + charx * 3
-    self.y += self.dy
-    # mic level
-    self.mic_text = wx.StaticText(self, -1, "Peak microphone audio level   None", pos=(tab0, self.y))
-    t = "Adjust the peak audio level to a few dB below zero."
-    wx.StaticText(self, -1, t, pos=(tab2, self.y))
-    self.y += self.dy
-    # Vox level
-    SliderBoxH(self, "VOX %d dB  ", application.levelVOX, -40, 0, application.OnLevelVOX, True, (tab0, self.y), tab1-tab0)
-    t = "Audio level that triggers VOX (all modes)."
-    wx.StaticText(self, -1, t, pos=(tab2, self.y))
-    self.y += self.dy
-    # VOX hang
-    SliderBoxH(self, "VOX %0.2f  ", application.timeVOX, 0, 4000, application.OnTimeVOX, True, (tab0, self.y), tab1-tab0, 0.001)
-    t = "Time to hold VOX after end of audio in seconds."
-    wx.StaticText(self, -1, t, pos=(tab2, self.y))
-    self.y += self.dy
-    # Tx Audio clipping
-    application.CtrlTxAudioClip = SliderBoxH(self, "Clip %2d  ", 0, 0, 20, application.OnTxAudioClip, True, (tab0, self.y), tab1-tab0)
-    t = "Tx audio clipping level in dB for this mode."
-    wx.StaticText(self, -1, t, pos=(tab2, self.y))
-    self.y += self.dy
-    # Tx Audio preemphasis
-    application.CtrlTxAudioPreemph = SliderBoxH(self, "Preemphasis %4.2f  ", 0, 0, 100, application.OnTxAudioPreemph, True, (tab0, self.y), tab1-tab0, 0.01)
-    t = "Tx audio preemphasis of high frequencies."
-    wx.StaticText(self, -1, t, pos=(tab2, self.y))
-    self.y += self.dy
-    self.SetScrollbars(1, 1, 100, self.y)
-  def OnGraphData(self, data=None):
-    if conf.microphone_name:
-      txt = "Peak microphone audio level %3.0f dB" % self.status.mic_max_display
-      self.mic_text.SetLabel(txt)
-    if self.tmp_playing and QS.set_record_state(-1):	# poll to see if playback is finished
-      self.tmp_playing = False
-      self.btn_playback.SetValue(False)
-      self.btn_record.Enable(1)
-  def OnBtnRecord(self, event):
-    if event.GetEventObject().GetValue():
-      QS.set_kill_audio(1)
-      self.btn_playback.Enable(0)
-      QS.set_record_state(4)
-    else:
-      QS.set_kill_audio(0)
-      self.btn_playback.Enable(1)
-      QS.set_record_state(1)
-  def OnBtnPlayback(self, event):
-    if event.GetEventObject().GetValue():
-      self.btn_record.Enable(0)
-      QS.set_record_state(2)
-      self.tmp_playing = True
-    else:
-      self.btn_record.Enable(1)
-      QS.set_record_state(3)
-      self.tmp_playing = False
 
 class GraphDisplay(wx.Window):
   """Display the FFT graph within the graph screen."""
@@ -1860,7 +1764,7 @@ class GraphDisplay(wx.Window):
     self.SetSize((self.graph_width, height))
   def OnGraphData(self, data):
     x = 0
-    for y in data:	# y is in dB, -130 to 0
+    for y in data:	# y is in dB, -200 to 0
       y = self.zeroDB - int(y * self.scale / 10.0 + 0.5)
       try:
         y0 = self.line[x][1]
@@ -2063,7 +1967,7 @@ class GraphScreen(wx.Window):
     f = float(x - self.x0) * sample_rate / self.data_width
     c = None
     y = originY + 1
-    for freq, color in conf.BandPlan:
+    for freq, color in application.BandPlan:
       freq -= VFO
       if f < freq:
         xend = int(self.x0 + float(freq) * self.data_width / sample_rate + 0.5)
@@ -2263,9 +2167,7 @@ class GraphScreen(wx.Window):
             freq = float(CW_x + self.originX - self.x0) * sample_rate / self.data_width + self.zoom_deltaf
             freq = int(freq)
       if self.mouse_is_rx:
-        application.rxFreq = freq
-        application.screen.SetTxFreq(self.txFreq, freq)
-        QS.set_tune(freq + application.ritFreq, self.txFreq)
+        self.ChangeHwFrequency(self.txFreq, self.VFO, 'MouseBtn1', event=event, rx_freq=freq)
       else:
         self.ChangeHwFrequency(freq, self.VFO, 'MouseBtn1', event=event)
     self.CaptureMouse()
@@ -2295,9 +2197,8 @@ class GraphScreen(wx.Window):
         freq = speed * x * sample_rate / self.data_width
         freq = int(freq)
         if self.mouse_is_rx:	# Mouse motion changes the receive frequency
-          application.rxFreq += freq
-          application.screen.SetTxFreq(self.txFreq, application.rxFreq)
-          QS.set_tune(application.rxFreq + application.ritFreq, self.txFreq)
+          freq2 = application.rxFreq + freq
+          self.ChangeHwFrequency(self.txFreq, self.VFO, 'MouseMotion', event=event, rx_freq=freq2)
         else:					# Mouse motion changes the transmit frequency
           self.ChangeHwFrequency(self.txFreq + freq, self.VFO, 'MouseMotion', event=event)
   def OnWheel(self, event):
@@ -2324,9 +2225,7 @@ class GraphScreen(wx.Window):
       else:		# freq can be negative when the VFO is zero
         freq = - (- freq // wm * wm)
       tune = freq - self.VFO
-      application.rxFreq = tune
-      application.screen.SetTxFreq(self.txFreq, tune)
-      QS.set_tune(tune + application.ritFreq, self.txFreq)
+      self.ChangeHwFrequency(self.txFreq, self.VFO, 'MouseWheel', event=event, rx_freq=tune)
     else:
       freq = self.txFreq + self.VFO + wm * event.GetWheelRotation() // event.GetWheelDelta()
       if conf.freq_spacing:
@@ -2337,8 +2236,8 @@ class GraphScreen(wx.Window):
         freq = - (- freq // wm * wm)
       tune = freq - self.VFO
       self.ChangeHwFrequency(tune, self.VFO, 'MouseWheel', event=event)
-  def ChangeHwFrequency(self, tune, vfo, source='', band='', event=None):
-    application.ChangeHwFrequency(tune, vfo, source, band, event)
+  def ChangeHwFrequency(self, tune, vfo, source='', band='', event=None, rx_freq=None):
+    application.ChangeHwFrequency(tune, vfo, source, band, event, rx_freq)
   def PeakHold(self, name):
     if name in ('GraphP1', 'WFallP1'):
       self.display.peak_hold = int(self.display.scale * conf.graph_peak_hold_1)
@@ -2349,7 +2248,7 @@ class GraphScreen(wx.Window):
     if self.display.peak_hold < 1:
       self.display.peak_hold = 1
 
-class StationScreen(wx.Window):		# This code was contributed by Christof, DJ4CM.  Many Thanks!!
+class StationScreen(wx.Window):		# This code was contributed by Christof, DJ4CM.  Many Thanks!! Edited May 2022.
   """Create a window below the graph X axis to display interesting frequencies."""
   def __init__(self, parent, width, lines):
     self.lineMargin = 2
@@ -2371,7 +2270,7 @@ class StationScreen(wx.Window):		# This code was contributed by Christof, DJ4CM.
       self.Bind(wx.EVT_LEAVE_WINDOW, self.OnLeaveWindow)
       # handle station info
       self.stationWindow = wx.PopupWindow (parent)
-      self.stationInfo = wx.richtext.RichTextCtrl(self.stationWindow)
+      self.stationInfo = wx.TextCtrl(self.stationWindow, style=wx.TE_MULTILINE|wx.TE_READONLY|wx.TE_NO_VSCROLL)
       self.stationInfo.SetFont(wx.Font(conf.status_font_size, wx.FONTFAMILY_SWISS, wx.NORMAL,
           wx.FONTWEIGHT_NORMAL, False, conf.quisk_typeface))
       self.stationWindow.Hide(); 
@@ -2455,7 +2354,7 @@ class StationScreen(wx.Window):		# This code was contributed by Christof, DJ4CM.
       self.tunedStation += 1
       if mode != '': # information about mode available
         mode = mode.upper()
-        application.OnBtnMode(None, mode)
+        application.modeButns.SetLabel(mode, True)
       application.ChangeRxTxFrequency(None, freq)
   def OnMotion(self, event):
     mouse_x, mouse_y = event.GetPosition()
@@ -2476,36 +2375,38 @@ class StationScreen(wx.Window):		# This code was contributed by Christof, DJ4CM.
           self.lastStationX = mouse_x
           if found == False:
             self.firstStationInRange = index
+            self.firstStationX = statX
             self.nrStationInRange = 0
             self.stationInfo.Clear()
             found = True
           self.nrStationInRange += 1
-          attr = self.stationInfo.GetBasicStyle()
-          attr.SetFlags(wx.TEXT_ATTR_TABS)
-          attr.SetTabs((40, 400, 700))
-          self.stationInfo.SetBasicStyle(attr)
-          self.stationInfo.BeginSymbolBullet(symbol, 0, 40) 
-          self.stationInfo.BeginBold()      
-          self.stationInfo.WriteText(statName + '\t')
-          self.stationInfo.EndBold()
-          self.stationInfo.WriteText (str(statFreq) + ' Hz\t' + statMode)
-          self.stationInfo.Newline()
-          self.stationInfo.EndSymbolBullet() 
-          self.stationInfo.BeginLeftIndent(40)
+          t = " %s  %s" % (symbol, statName)
+          width, height = self.stationInfo.GetTextExtent(t)
+          txt = t
+          t = " %s Hz   %s" % (FreqFormatter(statFreq), statMode)
+          w, h = self.stationInfo.GetTextExtent(t)
+          width = max(width, w)
+          height += h
+          txt += '\n'
+          txt += t
           if len(statDscr) > 0:
-            self.stationInfo.WriteText(statDscr)
-            self.stationInfo.Newline()
-          self.stationInfo.EndLeftIndent()   
+            t = " %s" % statDscr
+            w, h = self.stationInfo.GetTextExtent(t)
+            width = max(width, w)
+            height += h
+            txt += '\n'
+            txt += t
+          self.stationInfo.write(txt)
+          width += self.stationInfo.GetCharWidth() * 3
+          height += self.stationInfo.GetCharHeight() // 2
+          self.stationInfo.SetSize(wx.Size(width, height))
+          self.stationWindow.SetClientSize((width, height))
           self.mouse_x = mouse_x   
     if self.firstStationInRange != None:
-      line = self.stationInfo.GetVisibleLineForCaretPosition(self.stationInfo.GetCaretPosition()) 
-      cy = line.GetAbsolutePosition()[1]
-      self.stationWindow.SetClientSize((340, cy+2))
-      self.stationInfo.SetClientSize((340, cy+2))
+      w, h = self.stationInfo.GetSize()
       # convert coordinates to screen
-      sx, sy = self.ClientToScreen(wx.Point(mouse_x, mouse_y))
-      w, h = self.stationInfo.GetClientSize()
-      self.stationWindow.Move((sx - w * sx//graph.width, sy - h - 4)) 
+      rect = self.GetScreenRect()
+      self.stationWindow.Move(self.firstStationX, rect.GetY() - h)
       if not self.stationWindow.IsShown():
         self.stationWindow.Show()
     else:
@@ -2968,11 +2869,20 @@ class MultiRxGraph(GraphScreen):
       self.ChangeYzero(y_zero)
     else:
       self.waterfall_y_zero = y_zero
-  def ChangeHwFrequency(self, tune, vfo, source='', band='', event=None):
+  def ChangeHwFrequency(self, tune, vfo, source='', band='', event=None, rx_freq=None):
     self.SetTxFreq(tune, tune)
     self.SetVFO(vfo)
     Hardware.MultiRxFrequency(self.multirx_index, vfo)
     QS.set_multirx_freq(self.multirx_index, tune)
+  def ChangeRxTxFrequency(self, freq):
+    tune = freq - self.VFO
+    d = self.sample_rate * 45 // 100
+    if -d <= tune <= d:	# Frequency is on-screen
+      vfo = self.VFO
+    else:					# Change the VFO
+      vfo = (freq // 5000) * 5000 - 5000
+      tune = freq - vfo
+    self.ChangeHwFrequency(tune, vfo, 'FreqEntry')
 
 class MultiReceiverScreen(wx.SplitterWindow):
   # The top level screen showing a graph, waterfall and any additional receivers.
@@ -3340,7 +3250,7 @@ class FilterScreen(GraphScreen):
     self.doResize = True
   def OnGraphData(self, data):
     GraphScreen.OnGraphData(self, self.data)
-  def ChangeHwFrequency(self, tune, vfo, source='', band='', event=None):
+  def ChangeHwFrequency(self, tune, vfo, source='', band='', event=None, rx_freq=None):
     GraphScreen.SetTxFreq(self, tune, tune)
     application.freqDisplay.Display(tune)
   def SetTxFreq(self, tx_freq, rx_freq):
@@ -3358,7 +3268,7 @@ class AudioFFTScreen(GraphScreen):
     self.sample_rate = sample_rate
   def OnGraphData(self, data):
     GraphScreen.OnGraphData(self, data)
-  def ChangeHwFrequency(self, tune, vfo, source='', band='', event=None):
+  def ChangeHwFrequency(self, tune, vfo, source='', band='', event=None, rx_freq=None):
     GraphScreen.SetTxFreq(self, tune, tune)
     application.freqDisplay.Display(tune)
   def SetTxFreq(self, tx_freq, rx_freq):
@@ -3413,225 +3323,7 @@ class QMainFrame(wx.Frame):
   def SetConfigText(self, text):
     if len(text) > 100:
       text = text[0:80] + '|||' + text[-17:]
-    self.SetTitle("Radio %s   %s   %s" % (configure.Settings[1], self.title, text))
-
-## Note: The amplitude/phase adjustments have ideas provided by Andrew Nilsson, VK6JBL.
-## October 2020: changed to make RxTx frequency and VFO two independent variables.
-class QAdjustPhase(wx.Frame):
-  """Create a window with amplitude and phase adjustment controls"""
-  f_ampl = "Amplitude adjustment %.6f"
-  f_phase = "Phase adjustment degrees %.6f"
-  def __init__(self, parent, width, rx_tx):
-    self.width = width
-    self.rx_tx = rx_tx		# Must be "rx" or "tx"
-    if rx_tx == 'tx':
-      self.is_tx = 1
-      t = "Adjust Sound Card Transmit Amplitude and Phase"
-    else:
-      self.is_tx = 0
-      t = "Adjust Sound Card Receive Amplitude and Phase"
-    wx.Frame.__init__(self, application.main_frame, -1, t, pos=(50, 100), style=wx.CAPTION)
-    self.panel = wx.Panel(self)
-    self.MakeControls()
-    self.Redraw()
-    self.Show()
-  def MakeControls(self):		# Make controls for phase/amplitude adjustment
-    panel = self.panel
-    width = self.width
-    self.old_amplitude, self.old_phase = application.GetAmplPhase(self.rx_tx)
-    self.new_amplitude, self.new_phase = self.old_amplitude, self.old_phase
-    sl_max = width * 4 // 10		# maximum +/- value for slider
-    self.ampl_scale = float(conf.rx_max_amplitude_correct) / sl_max
-    self.phase_scale = float(conf.rx_max_phase_correct) / sl_max
-    font = wx.Font(conf.default_font_size, wx.FONTFAMILY_SWISS, wx.NORMAL,
-          wx.FONTWEIGHT_NORMAL, False, conf.quisk_typeface)
-    self.SetFont(font)
-    charx = self.GetCharWidth()
-    self.tab1 = tab1 = charx
-    chary = self.GetCharHeight()
-    deltay = chary * 12 // 10
-    y = chary * 3 // 10
-    self.controls = []
-    txt = wx.StaticText(panel, -1, "No data", pos=(tab1, y))
-    self.controls.append(txt)
-    y += txt.GetSize().GetHeight()
-    #y += deltay * 14 // 10
-    self.t_ampl = wx.StaticText(panel, -1, self.f_ampl % self.old_amplitude, pos=(tab1, y))
-    self.controls.append(self.t_ampl)
-    y += deltay
-    fine = wx.StaticText(panel, -1, 'Fine', pos=(tab1, y))
-    self.controls.append(fine)
-    coarse = wx.StaticText(panel, -1, 'Coarse', pos=(tab1, y + deltay))
-    self.controls.append(coarse)
-    tab2 = tab1 + coarse.GetSize().GetWidth() + charx
-    sliderX = width - tab2 - charx
-    self.ampl1 = wx.Slider(panel, -1, 0, -sl_max, sl_max, pos=(tab2, y), size=(sliderX, -1))
-    self.controls.append(self.ampl1)
-    y += deltay
-    self.ampl2 = wx.Slider(panel, -1, 0, -sl_max, sl_max, pos=(tab2, y), size=(sliderX, -1))
-    self.controls.append(self.ampl2)
-    y += deltay * 14 // 10
-    self.PosAmpl(self.old_amplitude)
-    self.t_phase = wx.StaticText(panel, -1, self.f_phase % self.old_phase, pos=(tab1, y))
-    self.controls.append(self.t_phase)
-    y += deltay
-    fine = wx.StaticText(panel, -1, 'Fine', pos=(tab1, y))
-    self.controls.append(fine)
-    coarse = wx.StaticText(panel, -1, 'Coarse', pos=(tab1, y + deltay))
-    self.controls.append(coarse)
-    self.phase1 = wx.Slider(panel, -1, 0, -sl_max, sl_max, pos=(tab2, y), size=(sliderX, -1))
-    self.controls.append(self.phase1)
-    y += deltay
-    self.phase2 = wx.Slider(panel, -1, 0, -sl_max, sl_max, pos=(tab2, y), size=(sliderX, -1))
-    self.controls.append(self.phase2)
-    y += deltay
-    sv = QuiskPushbutton(panel, self.OnBtnSave, 'Save')
-    self.controls.append(sv)
-    dv = QuiskPushbutton(panel, self.OnBtnDestroyVFO, 'Destroy VFO')
-    self.controls.append(dv)
-    ds = QuiskPushbutton(panel, self.OnBtnDestroyALL, 'Destroy ALL')
-    self.controls.append(ds)
-    cn = QuiskPushbutton(panel, self.OnBtnFinished, 'Finished')
-    self.controls.append(cn)
-    hl = QuiskPushbutton(panel, self.OnBtnHelp, 'Help')
-    self.controls.append(hl)
-    w, h = ds.GetSize().Get()
-    sv.SetSize((w, h))
-    cn.SetSize((w, h))
-    hl.SetSize((w, h))
-    y += h * 5 // 10
-    x = (width - w * 5) // 6
-    sv.SetPosition((x, y))
-    dv.SetPosition((x*2 + w, y))
-    ds.SetPosition((x*3 + w*2, y))
-    cn.SetPosition((x*4 + w*3, y))
-    hl.SetPosition((x*5 + w*4, y))
-    sv.SetBackgroundColour('light blue')
-    dv.SetBackgroundColour('light blue')
-    ds.SetBackgroundColour('light blue')
-    cn.SetBackgroundColour('light blue')
-    hl.SetBackgroundColour('light blue')
-    y += h
-    y += h * 4 // 10
-    self.PosPhase(self.old_phase)
-    self.SetClientSize(wx.Size(width, y))
-    self.ampl1.Bind(wx.EVT_SCROLL, self.OnChange)
-    self.ampl2.Bind(wx.EVT_SCROLL, self.OnAmpl2)
-    self.phase1.Bind(wx.EVT_SCROLL, self.OnChange)
-    self.phase2.Bind(wx.EVT_SCROLL, self.OnPhase2)
-  def Redraw(self):
-    # Print available data points
-    self.band = application.lastBand
-    data = application.bandAmplPhase.get(self.band, {})
-    data = data.get(self.rx_tx, [])
-    if data:
-      t = "Band %s VFO and frequency list\n" % self.band
-      for vfo, items in data:
-        t += "%10d:" % vfo
-        for freq, ampl, phase in items:
-          t += " %7d" % freq
-        t += "\n"
-    else:
-      t = "Band %s: No data." % self.band
-    x, y = self.controls[0].GetPosition()
-    height = self.controls[0].GetSize().GetHeight()
-    self.controls[0].Destroy()
-    txt = wx.StaticText(self.panel, -1, t, pos=(self.tab1, y))
-    self.controls[0] = txt
-    delta = txt.GetSize().GetHeight() - height
-    for ctrl in self.controls[1:]:
-      x, y = ctrl.GetPosition()
-      y += delta
-      ctrl.Move(x, y)
-    h = self.GetClientSize().GetHeight()
-    self.SetClientSize(wx.Size(self.width, h + delta))
-  def PosAmpl(self, ampl):	# set pos1, pos2 for amplitude
-    pos2 = round(ampl / self.ampl_scale)
-    remain = ampl - pos2 * self.ampl_scale
-    pos1 = round(remain / self.ampl_scale * 50.0)
-    self.ampl1.SetValue(pos1)
-    self.ampl2.SetValue(pos2)
-  def PosPhase(self, phase):	# set pos1, pos2 for phase
-    pos2 = round(phase / self.phase_scale)
-    remain = phase - pos2 * self.phase_scale
-    pos1 = round(remain / self.phase_scale * 50.0)
-    self.phase1.SetValue(pos1)
-    self.phase2.SetValue(pos2)
-  def OnChange(self, event):
-    ampl = self.ampl_scale * self.ampl1.GetValue() / 50.0 + self.ampl_scale * self.ampl2.GetValue()
-    if abs(ampl) < self.ampl_scale * 3.0 / 50.0:
-      ampl = 0.0
-    self.t_ampl.SetLabel(self.f_ampl % ampl)
-    phase = self.phase_scale * self.phase1.GetValue() / 50.0 + self.phase_scale * self.phase2.GetValue()
-    if abs(phase) < self.phase_scale * 3.0 / 50.0:
-      phase = 0.0
-    self.t_phase.SetLabel(self.f_phase % phase)
-    QS.set_ampl_phase(ampl, phase, self.is_tx)
-    self.new_amplitude, self.new_phase = ampl, phase
-  def OnAmpl2(self, event):		# re-center the fine slider when the coarse slider is adjusted
-    ampl = self.ampl_scale * self.ampl1.GetValue() / 50.0 + self.ampl_scale * self.ampl2.GetValue()
-    self.PosAmpl(ampl)
-    self.OnChange(event)
-  def OnPhase2(self, event):	# re-center the fine slider when the coarse slider is adjusted
-    phase = self.phase_scale * self.phase1.GetValue() / 50.0 + self.phase_scale * self.phase2.GetValue()
-    self.PosPhase(phase)
-    self.OnChange(event)
-  def OnBtnDestroyVFO(self, event):	# Remove entry with the application VFO
-    data = application.bandAmplPhase.get(self.band, {})
-    data = data.get(self.rx_tx, [])
-    for i in range(len(data)):
-      if data[i][0] == application.VFO:
-        del data[i]
-        break
-    self.Redraw()
-  def OnBtnSave(self, event):
-    data = application.bandAmplPhase
-    if self.band not in data:
-      data[self.band] = {}
-    data = data[self.band]
-    if self.rx_tx not in data:
-      data[self.rx_tx] = []
-    data = data[self.rx_tx]
-    for vfo, items in data:		# All items must be lists, not tuples
-      if vfo == application.VFO:
-        for i in range(len(items)):
-          item = items[i]
-          if item[0] == application.rxFreq:
-            item[1] = self.new_amplitude
-            item[2] = self.new_phase
-            break
-        else:
-          items.append([application.rxFreq, self.new_amplitude, self.new_phase])
-          items.sort()
-        break
-    else:
-      data.append([application.VFO, [[application.rxFreq, self.new_amplitude, self.new_phase]]])
-      data.sort()
-    self.Redraw()
-  def OnBtnDestroyALL(self, event):
-    dlg = wx.MessageDialog(self, "This will destroy all data for band %s!" % self.band,
-      "Destroy Data", style = wx.YES|wx.NO)
-    if dlg.ShowModal() == wx.ID_YES:
-      if self.band in application.bandAmplPhase:
-        del application.bandAmplPhase[self.band]
-      self.Redraw()
-  def OnBtnFinished(self, event=None):
-    ampl, phase = application.GetAmplPhase(self.rx_tx)
-    QS.set_ampl_phase(ampl, phase, self.is_tx)
-    application.w_phase = None
-    self.Destroy()
-  def OnBtnHelp(self, event=None):
-    dlg = wx.MessageDialog(self,
-'The "VFO" is the frequency at the center of the graph screen. The Rx or Tx frequency is the offset from the VFO. \
-Adjust the VFO and the frequency as desired.  Then adjust the sliders to minimize the image. Press "Save" when satisfied. \
-To adjust the VFO, use the band Up/Down buttons, or right click the graph at the desired VFO. \
-Adjustments must be made for both receive and transmit on each band. \
-The maximum slider adjustment range can be changed on the radio Hardware screen. \
-The other buttons will delete the data for the current VFO, or for the whole band. \
-For more information, press the main "Help" button, \
-then "Documentation", then "SoftRock".'
-    , "Adjustment Help", style=wx.OK)
-    dlg.ShowModal()
+    self.SetTitle("Radio %s   %s   %s" % (application.local_conf.RadioName, self.title, text))
 
 class Spacer(wx.Window):
   """Create a bar between the graph screen and the controls"""
@@ -3667,7 +3359,8 @@ class App(wx.App):
   'txAudioPreemphUsb', 'txAudioPreemphAm', 'txAudioPreemphFm', 'txAudioPreemphFdv',
   'wfallScaleZ', 'wfallGrScaleZ', 'graphScaleZ', 'split_rxtx_play', 'modeFilter',
   'file_name_rec_audio', 'file_name_rec_samples', 'file_name_rec_mic', 'file_name_rec_tmp',
-  'file_name_play_audio', 'file_name_play_samples', 'file_name_play_cq'] 
+  'file_name_play_audio', 'file_name_play_samples', 'file_name_play_cq', 'freedv_mode',
+  'file_play_source', 'hermes_LNA_dB']
   def __init__(self):
     global application
     QS.AppStatus(1)
@@ -3675,14 +3368,9 @@ class App(wx.App):
     self.bottom_widgets = None
     self.dxCluster = None
     self.main_frame = None
-    if sys.platform == 'win32':
-      is_tty = False
-    else:
-      is_tty = sys.stdout.isatty()
-    if is_tty:
-      wx.App.__init__(self, redirect=False)
-    else:
-      wx.App.__init__(self, redirect=True)
+    self.remote_control_head = False
+    self.remote_control_slave = False
+    wx.App.__init__(self)
   def QuiskText(self, *args, **kw):			# Make our text control available to widget files
     return QuiskText(*args, **kw)
   def QuiskText1(self, *args, **kw):			# Make our text control available to widget files
@@ -3706,7 +3394,6 @@ class App(wx.App):
     quisk_widgets.application = self
     del quisk_widgets
     global conf		# conf is the module for all configuration data
-    import quisk_conf_defaults as conf
     setattr(conf, 'config_file_path', ConfigPath)
     setattr(conf, 'DefaultConfigDir', DefaultConfigDir)
     if os.path.isfile(ConfigPath):	# See if the user has a config file
@@ -3725,8 +3412,10 @@ class App(wx.App):
     self.QuiskFilesDir = os.path.dirname(conf.settings_file_path)	# directory for Quisk files
     if not os.path.isdir(self.QuiskFilesDir):
       self.QuiskFilesDir = DefaultConfigDir
+    self.std_out_err = StdOutput(self)
     QS.set_params(quisk_is_vna=0)	# We are not the VNA program
     # Read in configuration from the selected radio
+    self.BandPlan = []
     if self.main_frame:
       self.local_conf = configure.Configuration(self, 'Same')
     else:
@@ -3758,6 +3447,9 @@ class App(wx.App):
     self.bandAmplPhase = {}
     self.samples_from_python = False
     self.NewIdList = []                 # Hack: list of Ids in use for accelerator table
+    self.midi_message = []
+    self.idName2Button = {}
+    self.midi_handler = None
     if conf.use_rx_udp == 10:		# Hermes UDP protocol
       self.bandscope_clock = conf.rx_udp_clock
     else:
@@ -3808,6 +3500,7 @@ class App(wx.App):
       else:
         setattr(conf, 'widgets_file_name',  '')
     Hardware = self.Hardware
+    self.use_fast_heart_beat = hasattr(Hardware, "FastHeartBeat")
     # Initialization - may be over-written by persistent state
     self.local_conf.Initialize()
     self.clip_time0 = 0		# timer to display a CLIP message on ADC overflow
@@ -3851,12 +3544,18 @@ class App(wx.App):
     self.rxFreq = 0				# Receive  frequency as +/- sample_rate/2
     self.tx_level = 100				# initially 100%; Caution: there is also a conf.tx_level dictionary
     self.digital_tx_level = conf.digital_tx_level
-    self.hot_key_ptt_is_down = False
-    self.hot_key_ptt_was_down = False
-    self.hot_key_ptt_change = False
     self.fft_size = 1
     self.accel_list = []
     self.old_RxTx = 0
+    self.wsjtx_process = [None] * 10	# Maximum of 10 receivers
+    self.config_midi_window = None
+    self.hot_key_ptt_is_down = False
+    self.hot_key_ptt_was_down = False
+    self.hot_key_ptt_pressed = False
+    self.hot_key_ptt_active = False
+    self.freedv_mode = 'Mode 700D'		# restore FreeDV mode setting
+    self.freedv_menu = None
+    self.hermes_LNA_dB = 20
     if hasattr(Hardware, "OnChangeRxTx"):
       self.want_RxTx = True
     else:
@@ -3914,7 +3613,6 @@ class App(wx.App):
     self.zooming = False
     self.split_rxtx = False		# Are we in split Rx/Tx mode?
     self.split_locktx = False	# Split mode Tx frequency is fixed.
-    self.split_hamlib_tx = True	# Hamlib controls the Tx frequency when split; else the Rx frequency
     self.split_rxtx_play = 2    # Play 1=both, high on Right; 2=both, high on Left; 3=only Rx; 4=only Tx
     self.split_offset = 3000	# current frequency difference when using Split
     self.savedState = {}
@@ -3931,6 +3629,7 @@ class App(wx.App):
     self.file_name_play_audio = ''
     self.file_name_play_samples = ''
     self.file_name_play_cq = ''
+    self.midiControls = {}		# Control object and associated function for Midi control name
     # get the screen size - thanks to Lucian Langa
     x, y, self.screen_width, self.screen_height = wx.Display().GetGeometry()	# Using display index 0
     self.Bind(wx.EVT_IDLE, self.OnIdle)
@@ -4002,10 +3701,15 @@ class App(wx.App):
     else:
       self.main_frame = frame = QMainFrame(self.width, self.height)
     self.SetTopWindow(frame)
+    self.std_out_err.Create(frame)
+    if conf.pulse_audio_verbose_output == 0:
+      self.std_out_err.Show(False)
+    else:
+      self.std_out_err.Show(True)
     #w, h = frame.GetSize().Get()
     #ww, hh = frame.GetClientSizeTuple()
     #print ('Main frame: size', w, h, 'client', ww, hh)
-    # Find the data width from a list of prefered sizes; it is the width of returned graph data.
+    # Find the data width from a list of preferred sizes; it is the width of returned graph data.
     # The graph_width is the width of data_width that is displayed.
     if conf.window_width > 0:
       wFrame, h = frame.GetClientSize().Get()				# client window width
@@ -4101,6 +3805,10 @@ class App(wx.App):
        QS.control_midi(device=found)
     QS.record_app(self, conf, self.data_width, self.graph_width, self.fft_size,
                  self.multi_rx_screen.rx_data_width, self.sample_rate, h, wisdom_path)
+    # Start wdsp
+    self.wdsp = quisk_wdsp.Cwdsp(self)
+    self.wdsp_channel = 1
+    self.wdsp.open(self.wdsp_channel)
     #print ('data_width %d, FFT size %d, FFT mult %d, average_count %d, rate %d, Refresh %.2f Hz' % (
     #    self.data_width, self.fft_size, self.fft_size / self.data_width, average_count, self.sample_rate,
     #    float(self.sample_rate) / self.fft_size / average_count))
@@ -4176,7 +3884,7 @@ class App(wx.App):
         item = gbs.FindItemAtPosition((0, i))
         item.SetSpan((rows, 1))
     self.OpenHardware()
-    msg = QS.open_key(conf.quisk_serial_port, conf.quisk_serial_cts, conf.quisk_serial_dsr)
+    msg = QS.open_key(port=conf.quisk_serial_port, cts=conf.quisk_serial_cts, dsr=conf.quisk_serial_dsr)
     if msg:
       print(msg)
     self.OpenSound()
@@ -4194,6 +3902,8 @@ class App(wx.App):
     self.Yield()
     self.sound_thread = SoundThread(self.samples_from_python)
     self.sound_thread.start()
+    if self.samples_from_python:
+      Hardware.StartSamples()
     if conf.dxClHost:
       # create DX Cluster and register listener for change notification
       self.dxCluster = dxcluster.DxCluster()
@@ -4202,24 +3912,83 @@ class App(wx.App):
     # Create shortcut keys for buttons
     if conf.button_layout == 'Large screen':
       for button in self.modeButns.GetButtons():	# mode buttons
+        self.idName2Button[button.idName] = button
         if button.char_shortcut:
           rid = self.QuiskNewId()
           self.main_frame.Bind(wx.EVT_MENU, self.modeButns.Shortcut, id=rid)
           self.accel_list.append(wx.AcceleratorEntry(wx.ACCEL_ALT, ord(button.char_shortcut), rid))
       for button in self.bandBtnGroup.GetButtons():	# band buttons
+        self.idName2Button[button.idName] = button
         if button.char_shortcut:
           rid = self.QuiskNewId()
           self.main_frame.Bind(wx.EVT_MENU, self.bandBtnGroup.Shortcut, id=rid)
           self.accel_list.append(wx.AcceleratorEntry(wx.ACCEL_ALT, ord(button.char_shortcut), rid))
-    # Create a shortcut for the PTT key. This is only used if the hot key does NOT work when Quisk is hidden.
-    if conf.hot_key_ptt1 and not conf.hot_key_ptt_if_hidden:
-      rid = self.QuiskNewId()
-      frame.Bind(wx.EVT_MENU, self.OnHotKey, id=rid)
-      self.accel_list.append(wx.AcceleratorEntry(conf.hot_key_ptt2, conf.hot_key_ptt1, rid))
+    else:	# Small screen
+      for button in self.modeButns.GetButtons():	# mode buttons
+        self.idName2Button[button.idName] = self.modeButns
+      for button in self.bandBtnGroup.GetButtons():	# band buttons
+        self.idName2Button[button.idName] = self.bandBtnGroup
     self.main_frame.SetAcceleratorTable(wx.AcceleratorTable(self.accel_list))
-    self.OnBtnMode(None, self.mode)
+    self.modeButns.SetLabel(self.mode, True)
   #  self.OnTestTimer(None)
+    if hasattr(Hardware, 'post_open'):	# post_open() is called after open() and after sound is started
+      Hardware.post_open()
+    self.StartWsjtx()
+    self.midiControls["Tune"]	= (None,		None)
+    self.midiControls["Vol"]	= (self.sliderVol,	self.ChangeVolume)
+    self.midiControls["STo"]	= (self.sliderSto,	self.ChangeSidetone)
+    self.midiControls["Rit"]	= (self.ritScale,	self.OnRitScale)
+    self.midiControls["Ys"]	= (self.sliderYs,	self.ChangeYscale)
+    self.midiControls["Yz"]	= (self.sliderYz,	self.ChangeYzero)
+    self.midiControls["Zo"]	= (self.sliderZo,	self.OnChangeZoom)
+    bw = self.bottom_widgets
+    if hasattr(bw, "sliderLNA"):
+      self.midiControls["RfLna"]	= (bw.sliderLNA,	bw.OnLNA)
+    self.Bind(wx.EVT_CHAR_HOOK, self.OnKeyHook)
     return True
+  def OnStartWsjtx(self, ctrl):
+    method = ctrl.GetValue()
+    if method[-3:] == "now":
+      self.StartWsjtx(method, ctrl)
+    else:
+      self.local_conf.globals["start_wsjtx"] = method
+      self.local_conf.settings_changed = True
+  def StartWsjtx(self, method=None, ctrl=None):
+    path = self.local_conf.globals.get('path_to_wsjtx', '')
+    if not path:
+      if sys.platform == 'win32':
+        path = "C:\\WSJT\\wsjtx\\bin\\wsjtx.exe"
+      else:
+        path = "/usr/bin/wsjtx"
+    cfg = self.local_conf.globals.get('config_wsjtx', '')
+    if cfg:
+      prog = [path, "--rig-name", "quisk", "--config", cfg]
+    else:
+      prog = [path, "--rig-name", "quisk"]
+    if method is None:
+      method = self.local_conf.globals.get("start_wsjtx", "Never")
+    if method == "Never":
+      return
+    if not os.path.isfile(path):
+      self.wsjtx_wait = wx.BusyInfo("Path to WSJT-X was not found.")
+      wx.CallLater(5000, self.StartWsjtxDone, None)
+      if ctrl:
+        ctrl.SetText("Never")
+      return
+    if method == "Main Rx0 on startup":
+      self.wsjtx_process[0] = subprocess.Popen(prog, shell=False)
+    elif method == "Main Rx0 now":
+      if self.wsjtx_process[0] is None or self.wsjtx_process[0].poll() is not None:
+        self.wsjtx_wait = wx.BusyInfo("Starting WSJT-X...")
+        self.wsjtx_process[0] = subprocess.Popen(prog, shell=False)
+      else:
+        self.wsjtx_wait = wx.BusyInfo("WSJT-X was already started")
+      wx.CallLater(5000, self.StartWsjtxDone, ctrl)
+  def StartWsjtxDone(self, ctrl):
+    del self.wsjtx_wait
+    if ctrl:
+      method = self.local_conf.globals.get("start_wsjtx", "Never")
+      ctrl.SetText(method)
   #def OnTestTimer(self, event):		# temporary code to switch bands and look for a bug
   #  if event is None:
   #    self.test_time0 = 0
@@ -4274,27 +4043,15 @@ class App(wx.App):
         if raw:
           self.sound_devices.append((1, 'wasapi:', description, device, '', ''))
     elif sys.platform == 'darwin':
-      # start with portaudio: not alsa:
-      try:
-        dev_capt, dev_play = QS.sound_devices()
-        for name in dev_capt:
-          device = name
-          description = name
-          self.sound_devices.append((0, 'portaudio:', description, device, '', ''))
-        for name in dev_play:
-            device = name
-            description = name
-            self.sound_devices.append((1, 'portaudio:', description, device, '', ''))
-      except:
-        self.sound_devices.append((0, 'pulse:', 'default', 'default', '', ''))
-        self.sound_devices.append((1, 'pulse:', 'default', 'default', '', ''))
-        dev_capt, dev_play = QS.pa_sound_devices()
-        for device, description, alsa in dev_capt:
-            self.sound_devices.append((0, 'pulse:', description, device, '', ''))
-        for device, description, alsa in dev_play:
-            self.sound_devices.append((1, 'pulse:', description, device, '', ''))
+      # Add PortAudio names
+      dev_capt, dev_play = QS.portaudio_sound_devices()
+      for name in dev_capt:
+        self.sound_devices.append((0, 'portaudio:', name, name, '', ''))
+      for name in dev_play:
+        self.sound_devices.append((1, 'portaudio:', name, name, '', ''))
     else:
-      dev_capt, dev_play = QS.sound_devices()
+      # Add Alsa names
+      dev_capt, dev_play = QS.alsa_sound_devices()
       for name in dev_capt:
         i = name.rfind(" (hw:")
         if i > 5:
@@ -4313,10 +4070,11 @@ class App(wx.App):
           device = name
           description = name
         self.sound_devices.append((1, 'alsa:', description, device, device, description))
+    if QS.get_params("QUISK_HAVE_PULSEAUDIO"):
       # Add PulseAudio names
       self.sound_devices.append((0, 'pulse:', 'default', 'default', '', ''))
       self.sound_devices.append((1, 'pulse:', 'default', 'default', '', ''))
-      dev_capt, dev_play = QS.pa_sound_devices()	# device, description, alsa description (alsa device) or ""
+      dev_capt, dev_play = QS.pulseaudio_sound_devices()	# device, description, alsa description (alsa device) or ""
       for device, description, alsa in dev_capt:
         i = alsa.rfind(" (hw:")
         if i > 5:
@@ -4335,7 +4093,7 @@ class App(wx.App):
           alsa_device =  ''
           alsa_description =  ''
         self.sound_devices.append((1, 'pulse:', description, device, alsa_device, alsa_description))
-    if conf.pulse_audio_verbose_output > 1:
+    if conf.pulse_audio_verbose_output > 2:
       print ("Sound devices:")
       for play, prefix, description, device, alsa_device, alsa_description in self.sound_devices:
         print (prefix, play, description, ';', device, ';', alsa_device, ';', alsa_description, '.')
@@ -4352,7 +4110,9 @@ class App(wx.App):
       else:
         t = "%s%s" % (prefix, description)
       if prefix == "pulse:":
-        if play:
+        if "QuiskDigital" in t:		# Add these names selectively in configure.py
+          pass
+        elif play:
           pulse_play.append(t)
         else:
           pulse_capt.append(t)
@@ -4361,7 +4121,7 @@ class App(wx.App):
           self.dev_play.append(t)
         else:
           self.dev_capt.append(t)
-    if sys.platform != 'win32':
+    if QS.get_params("QUISK_HAVE_PULSEAUDIO"):
       self.dev_capt += pulse_capt
       self.dev_play += pulse_play
   def SetSoundDevices(self):
@@ -4372,6 +4132,14 @@ class App(wx.App):
         ("digital_output_name",		1, 2),
         ("sample_playback_name",	1, 3),
         ("digital_rx1_name",		1, 4),
+        ("digital_rx2_name",		1, 5),
+        ("digital_rx3_name",		1, 6),
+        ("digital_rx4_name",		1, 7),
+        ("digital_rx5_name",		1, 8),
+        ("digital_rx6_name",		1, 9),
+        ("digital_rx7_name",		1, 10),
+        ("digital_rx8_name",		1, 11),
+        ("digital_rx9_name",		1, 12),
         ("name_of_sound_capt",		0, 0),
         ("microphone_name",		0, 1),
         ("digital_input_name",		0, 2)
@@ -4402,7 +4170,7 @@ class App(wx.App):
         else:
           windows_driver = DEV_DRIVER_DIRECTX
         QS.set_sound_name(index, is_play, windows_driver, found_desc, found_dev)
-        if conf.pulse_audio_verbose_output:
+        if conf.pulse_audio_verbose_output > 2:
           print (name, "Windows driver %d" % windows_driver, found_desc, ';', found_dev)
         continue
       if value[0:9] == 'portaudio':
@@ -4423,7 +4191,7 @@ class App(wx.App):
             found_desc = value
             found_dev = value[6:].strip()
         QS.set_sound_name(index, is_play, DEV_DRIVER_PULSEAUDIO, found_desc, found_dev)
-        if conf.pulse_audio_verbose_output:
+        if conf.pulse_audio_verbose_output > 2:
           print (name, "Pulse", found_desc, ';', found_dev)
         continue
       if value[0:5] == 'alsa:':
@@ -4433,7 +4201,7 @@ class App(wx.App):
           found_desc = value
           found_dev = value[5:]
         QS.set_sound_name(index, is_play, DEV_DRIVER_ALSA, found_desc, found_dev)
-        if conf.pulse_audio_verbose_output:
+        if conf.pulse_audio_verbose_output > 2:
           print (name, "Alsa driver %d" % DEV_DRIVER_ALSA, found_desc, ';', found_dev)
         continue
       # No initial "alsa:", "pulse:", etc.
@@ -4442,9 +4210,17 @@ class App(wx.App):
         a_dev = value
         a_desc = value
       QS.set_sound_name(index, is_play, DEV_DRIVER_ALSA, a_desc, a_dev)
-      if conf.pulse_audio_verbose_output:
+      if conf.pulse_audio_verbose_output > 2:
         print (name, "Alsa driver %d" % DEV_DRIVER_ALSA, a_desc, ';', a_dev)
   def GetSoundDevice(self, in_play, in_value, in_prefix):
+    if in_prefix == "pulse:" and in_value[0:10] == " Use name ":	# Convert null-sink names "pulse: Use name xxxx"
+      dev = in_value[10:]
+      if dev[-8:] == ".monitor":
+        dev = dev[0:-8]
+      else:
+        dev = dev + ".monitor"
+      found = [in_value[1:], dev, '', '']
+      return found
     found = None
     partial = None
     for data in self.sound_devices:
@@ -4497,6 +4273,8 @@ class App(wx.App):
     QS.set_file_name(record_button=0)	# Turn off file recording
     time.sleep(0.1)
     if self.sound_thread:
+      if self.samples_from_python:
+        Hardware.StopSamples()
       self.sound_thread.stop()
       for i in range(0, 20):
         if not self.sound_thread.is_alive():
@@ -4507,6 +4285,9 @@ class App(wx.App):
     Hardware.close()
     self.SaveState()
     self.local_conf.SaveState()
+    if self.hamlib_socket:
+      self.hamlib_socket.close()
+      self.hamlib_socket = None
     if self.dxCluster:
       self.dxCluster.stop()
     if self.hamlib_com1_handler:
@@ -4552,7 +4333,18 @@ class App(wx.App):
         traceback.print_exc()
         self.bandAmplPhase[band] = {}
   def ImmediateChange(self, name):
-    #value = getattr(conf, name)
+    if name == "pulse_audio_verbose_output":
+      value = getattr(conf, name)
+      if value == 0:
+        self.std_out_err.Show(False)
+      else:
+        self.std_out_err.Show(True)
+    elif name == "quisk_serial_port":
+      QS.open_key(port=conf.quisk_serial_port)
+    elif name == "quisk_serial_cts":
+      QS.open_key(cts=conf.quisk_serial_cts)
+    elif name == "quisk_serial_dsr":
+      QS.open_key(dsr=conf.quisk_serial_dsr)
     if hasattr(Hardware, "ImmediateChange"):
       Hardware.ImmediateChange(name)
     QS.ImmediateChange(name)
@@ -4665,7 +4457,8 @@ class App(wx.App):
       self.bandBtnGroup = RadioButtonGroup(frame, self.OnBtnBand, conf.bandLabels, None, shortcuts)
     else:
       self.widget_row = 6		# Next available row for widgets
-      self.bandBtnGroup = RadioBtnPopup(frame, self.OnBtnBand, conf.bandLabels, None)
+      self.bandBtnGroup = RadioBtnPopup(frame, self.OnBtnBand, conf.bandLabels, None, 'bandBtnGroup')
+    self.bandBtnGroup.idName = 'bandBtnGroup'
     # Add sliders on the left
     gbs.Add(self.sliderVol, (0, 0), (self.widget_row, 1), flag=wx.EXPAND|wx.LEFT, border=margin)
     if conf.use_sidetone:
@@ -4675,16 +4468,21 @@ class App(wx.App):
     else:
       self.slider_columns = [0]
       button_start_col = 1
-    # Receive button row: Mute, AGC
+    # Receive button row: Mute, NR2, AGC
     left_row2 = []
     b = b_mute = QuiskCheckbutton(frame, self.OnBtnMute, text='Mute')
     b.char_shortcut = 'u'
     self.MakeAccel(b)
     left_row2.append(b)
+    b = QuiskCheckbutton(frame, self.OnBtnNR2, text='NR2')
+    if not self.wdsp.version:
+      b.Enable(False)
+    left_row2.append(b)
     self.BtnAGC = agc = QuiskCheckbutton(frame, self.OnBtnAGC, 'AGC')
     agc.char_shortcut = 'G'
     self.MakeAccel(agc)
     b = WrapSlider(agc, self.OnBtnAGC, display=True)
+    self.midiControls["AGCSlider"] = (b, None)
     b.SetDual(True)
     b.SetSlider(value_off=self.levelOffAGC, value_on=self.levelAGC)
     agc.SetValue(True, True)
@@ -4693,11 +4491,21 @@ class App(wx.App):
     b.char_shortcut = 'q'
     self.MakeAccel(b)
     self.sliderSquelch = WrapSlider(b, self.OnBtnSquelch, display=True)
+    self.midiControls["SqlchSlider"] = (self.sliderSquelch, None)
     left_row2.append(self.sliderSquelch)
-    b = QuiskCycleCheckbutton(frame, self.OnBtnNB, ('NB', 'NB 1', 'NB 2', 'NB 3'))
-    b.char_shortcut = 'B'
-    self.MakeAccel(b)
+    # Noise Blanker
+    self.NB_menu = QuiskMenu("NB_menu")
+    for t in ("NB 1", "NB 2", "NB 3"):
+      self.NB_menu.AppendRadioItem(t, self.OnMenuNB, t == "NB 1")
+    item = self.NB_menu.AppendRadioItem("SNB", self.OnMenuNB)
+    if not self.wdsp.version:
+      item.Enable(False)
+    self.btnNB = QuiskCheckbutton(frame, self.OnBtnNB, text='NB 1')
+    self.btnNB.char_shortcut = 'B'
+    self.MakeAccel(self.btnNB)
+    b = WrapMenu(self.btnNB, self.NB_menu)
     left_row2.append(b)
+    # Notch
     b = QuiskCheckbutton(frame, self.OnBtnAutoNotch, text='Notch')
     b.char_shortcut = 'h'
     self.MakeAccel(b)
@@ -4736,8 +4544,9 @@ class App(wx.App):
       b_test1 = None
     # Transmit button row: Spot
     left_row3=[]
-    bt = QuiskCheckbutton(frame, self.OnBtnSpot, 'Spot', color=conf.color_test)
+    bt = self.spotButton = QuiskCheckbutton(frame, self.OnBtnSpot, 'Spot', color=conf.color_test)
     b = WrapSlider(bt, self.OnBtnSpot, slider_value=self.levelSpot, display=True)
+    self.midiControls["SpotSlider"] = (b, None)
     if hasattr(Hardware, 'OnSpot'):
       bt.char_shortcut = 'o'
       self.MakeAccel(bt)
@@ -4745,33 +4554,15 @@ class App(wx.App):
       b.Enable(False)
     left_row3.append(b)
     # Split button
-    self.split_menu = wx.Menu()
-    item1 = self.split_menu.AppendRadioItem(-1, 'Play both, High Freq on R')
-    self.Bind(wx.EVT_MENU, self.OnMenuSplitPlay1, item1)
-    item2 = self.split_menu.AppendRadioItem(-1, 'Play both, High Freq on L')
-    self.Bind(wx.EVT_MENU, self.OnMenuSplitPlay2, item2)
-    item3 = self.split_menu.AppendRadioItem(-1, 'Play only Rx')
-    self.Bind(wx.EVT_MENU, self.OnMenuSplitPlay3, item3)
-    item4 = self.split_menu.AppendRadioItem(-1, 'Play only Tx')
-    self.Bind(wx.EVT_MENU, self.OnMenuSplitPlay4, item4)
-    if self.split_rxtx_play == 1:
-      item1.Check()
-    elif self.split_rxtx_play == 2:
-      item2.Check()
-    elif self.split_rxtx_play == 3:
-      item3.Check()
-    elif self.split_rxtx_play == 4:
-      item4.Check()
+    self.split_menu = QuiskMenu("split_menu")
+    pl = self.split_rxtx_play
+    self.split_menu.AppendRadioItem('Play both, High Freq on R', self.OnMenuSplitPlay1, pl == 1)
+    self.split_menu.AppendRadioItem('Play both, High Freq on L', self.OnMenuSplitPlay2, pl == 2)
+    self.split_menu.AppendRadioItem('Play only Rx', self.OnMenuSplitPlay3, pl == 3)
+    self.split_menu.AppendRadioItem('Play only Tx', self.OnMenuSplitPlay4, pl == 4)
     self.split_menu.AppendSeparator()
-    item = self.split_menu.Append(-1, 'Reverse Rx and Tx')
-    self.Bind(wx.EVT_MENU, self.OnMenuSplitRev, item)
-    item = self.split_menu.AppendCheckItem(-1, 'Lock Tx Frequency')
-    self.Bind(wx.EVT_MENU, self.OnMenuSplitLock, item)
-    self.split_menu.AppendSeparator()
-    item = self.split_menu.AppendRadioItem(-1, 'Hamlib control Tx')
-    self.Bind(wx.EVT_MENU, self.OnMenuSplitCtlTx, item)
-    item = self.split_menu.AppendRadioItem(-1, 'Hamlib control Rx')
-    self.Bind(wx.EVT_MENU, self.OnMenuSplitCtlRx, item)
+    self.split_menu.Append('Reverse Rx and Tx', self.OnMenuSplitRev)
+    self.split_menu.AppendCheckItem('Lock Tx Frequency', self.OnMenuSplitLock, False)
     b = QuiskCheckbutton(frame, self.OnBtnSplit, "Split")
     b.char_shortcut = 'l'
     self.MakeAccel(b)
@@ -4817,6 +4608,7 @@ class App(wx.App):
     left_row3.append(self.btn_file_record)
     self.btnFilePlay = QuiskCheckbutton(frame, self.OnBtnFilePlay, conf.Xbtn_text_file_play)
     left_row3.append(self.btnFilePlay)
+    self.config_screen.config.InitRecPlay()
     self.config_screen.config.EnableRecPlay()
     ### Right bank of buttons
     mode_names = ['CWL', 'CWU', 'LSB', 'USB', 'AM', 'FM', 'DGT-U', 'DGT-L', 'DGT-FM', 'DGT-IQ', 'FDV-U', 'FDV-L', 'IMD']
@@ -4846,28 +4638,26 @@ class App(wx.App):
     self.config_screen.favorites.SetModeEditor(mode_names)
     if conf.button_layout == 'Large screen':
       self.modeButns = RadioButtonGroup(frame, self.OnBtnMode, labels, None, shortcuts)
+      self.modeButns.buttons[0].idName = "CW U/L"
+      self.modeButns.buttons[1].idName = "SSB U/L"
+      self.modeButns.buttons[4].idName = "DGT"
     else:
       labels = ['CWL', 'CWU', 'LSB', 'USB', 'AM', 'FM', 'DGT-U', 'DGT-L', 'DGT-FM', 'DGT-IQ', 'FDV-U', 'IMD']
-      self.modeButns = RadioBtnPopup(frame, self.OnBtnMode, labels, None)
+      self.modeButns = RadioBtnPopup(frame, self.OnBtnMode, labels, None, 'modeButns')
+    self.modeButns.idName = "modeButns"
     self.freedv_menu_items = {}
     if conf.add_freedv_button:
-      self.freedv_menu = wx.Menu()
-      item = self.freedv_menu.Append(-1, 'Upper sideband')
-      self.Bind(wx.EVT_MENU, self.OnFreedvMenu, item)
-      item = self.freedv_menu.Append(-1, 'Lower sideband')
-      self.Bind(wx.EVT_MENU, self.OnFreedvMenu, item)
-      self.freedv_menu.AppendSeparator()
+      self.freedv_menu = QuiskMenu("freedv_menu")
       msg = conf.freedv_tx_msg
       QS.freedv_set_options(mode=conf.freedv_modes[0][1], tx_msg=msg, DEBUG=0, squelch=1)
       for mode, index in conf.freedv_modes:
-        item = self.freedv_menu.AppendRadioItem(-1, mode)
+        item = self.freedv_menu.AppendRadioItem(mode, self.OnFreedvMenu, mode == self.freedv_mode)
         self.freedv_menu_items[index] = item
-        self.Bind(wx.EVT_MENU, self.OnFreedvMenu, item)
-        if '700D' in mode:
-          item.Check()
+        if mode == self.freedv_mode:	# Restore mode
           QS.freedv_set_options(mode=index)
       if conf.button_layout == 'Large screen':
-        b = QuiskCheckbutton(frame, self.OnBtnMode, 'FDV-U')
+        b = QuiskCycleCheckbutton(frame, None, ('FDV-U', 'FDV-L'), is_radio=True)
+        b.idName = "FDV"
         b.char_shortcut = 'F'
         self.btnFreeDV = WrapMenu(b, self.freedv_menu)
         self.modeButns.ReplaceButton(n_freedv, self.btnFreeDV)
@@ -4891,15 +4681,25 @@ class App(wx.App):
         b = QuiskCheckbutton(frame, None, 'IMD', color=conf.color_test)
         b.char_shortcut = 'I'
         b = WrapSlider(b, self.OnImdSlider, slider_value=val, display=True)
+        self.midiControls["IMDSlider"] = (b, None)
         self.modeButns.ReplaceButton(n_imd, b)
       else:
         self.modeButns.AddSlider('IMD', self.OnImdSlider, slider_value=val, display=True)
     labels = ('2000', '2000', '2000', '2000', '2000', '2000')
     self.filterButns = RadioButtonGroup(frame, self.OnBtnFilter, labels, None)
+    self.filterButns.idName = "filterButns"
     b = QuiskCheckbutton(frame, None, str(self.filterAdjBw1))
     b = WrapSlider(b, self.OnBtnAdjFilter, slider_value=self.filterAdjBw1, wintype='filter')
+    self.midiControls["Filter 6Slider"] = (b, None)
     self.filterButns.ReplaceButton(5, b)
     right_row2 = self.filterButns.GetButtons()
+    for i in range(0, 6):
+      b = right_row2[i]
+      if isinstance(b, WrapSlider):
+        b.button.idName = "Filter %d" % (i + 1)
+        #b.idName = "Filter"
+      else:
+        b.idName = "Filter %d" % (i + 1)
     if self.rate_audio_fft:
       t = "Audio FFT"
     elif self.bandscope_clock:		# Hermes UDP protocol
@@ -4911,18 +4711,25 @@ class App(wx.App):
       self.screenBtnGroup = RadioButtonGroup(frame, self.OnBtnScreen, labels, conf.default_screen)
       right_row3 = self.screenBtnGroup.GetButtons()
     else:
-      labels = ('Graph', 'GraphP1', 'GraphP2', 'WFall', 'Scope', 'Config', t)
-      self.screenBtnGroup = RadioBtnPopup(frame, self.OnBtnScreen, labels, conf.default_screen)
+      labels = ('Graph', 'GraphP1', 'GraphP2', 'WFall', 'WFallP1', 'WFallP2', 'Scope', 'Config', t)
+      self.screenBtnGroup = RadioBtnPopup(frame, self.OnBtnScreen, labels, conf.default_screen, 'screenBtnGroup')
+      for button in self.screenBtnGroup.GetButtons():
+        self.idName2Button[button.idName] = self.screenBtnGroup
+    self.screenBtnGroup.idName = "screenBtnGroup"
     # Top row -----------------
     # Band down button
     szr = wx.BoxSizer(wx.HORIZONTAL)	# add control to box sizer for centering
     b_bandupdown = szr
     b = QuiskRepeatbutton(frame, self.OnBtnDownBand, conf.Xbtn_text_range_dn,
              self.OnBtnUpDnBandDone, use_right=True)
+    b.idName = "Band " + b.idName
+    self.idName2Button[b.idName] = b
     szr.Add(b, 1, flag=wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, border=1)
     # Band up button
     b = QuiskRepeatbutton(frame, self.OnBtnUpBand, conf.Xbtn_text_range_up,
              self.OnBtnUpDnBandDone, use_right=True)
+    b.idName = "Band " + b.idName
+    self.idName2Button[b.idName] = b
     szr.Add(b, 1, flag=wx.ALIGN_CENTER_VERTICAL|wx.LEFT, border=1)
     # Memory buttons
     szr = wx.BoxSizer(wx.HORIZONTAL)	# add control to box sizer for centering
@@ -4956,6 +4763,7 @@ class App(wx.App):
     szr = wx.BoxSizer(wx.HORIZONTAL)	# add control to box sizer for centering
     b_rit = szr
     self.ritButton = QuiskCheckbutton(frame, self.OnBtnRit, "RIT")
+    self.idName2Button[self.ritButton.idName] = self.ritButton
     szr.Add(self.ritButton, 1, flag=wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, border=1)
     self.ritButton.SetLabel("RIT %d" % self.ritFreq)
     self.ritButton.Refresh()
@@ -4982,7 +4790,8 @@ class App(wx.App):
       frame.Bind(wx.EVT_TEXT_ENTER, self.FreqEntry, source=e)
     # S-meter
     self.smeter = QuiskText(frame, ' S9+23 -166.00 dB ', bh, 0, True)
-    b = QuiskPushbutton(frame, self.OnSmeterRightDown, '..')
+    from quisk_widgets import _bitmap_menupop
+    b = QuiskBitmapButton(frame, self.OnSmeterRightDown, _bitmap_menupop)
     szr = wx.BoxSizer(wx.HORIZONTAL)
     b_smeter = szr
     szr.Add(self.smeter, 1, flag=wx.ALIGN_CENTER_VERTICAL)
@@ -4991,19 +4800,13 @@ class App(wx.App):
     self.smeter.TextCtrl.SetBackgroundColour(conf.color_freq)
     self.smeter.TextCtrl.SetForegroundColour(conf.color_freq_txt)
     # Make a popup menu for the s-meter
-    self.smeter_menu = wx.Menu()
-    item = self.smeter_menu.Append(-1, 'S-meter 1')
-    self.Bind(wx.EVT_MENU, self.OnSmeterMeterA, item)
-    item = self.smeter_menu.Append(-1, 'S-meter 5')
-    self.Bind(wx.EVT_MENU, self.OnSmeterMeterB, item)
-    item = self.smeter_menu.Append(-1, 'Frequency 2')
-    self.Bind(wx.EVT_MENU, self.OnSmeterFrequencyA, item)
-    item = self.smeter_menu.Append(-1, 'Frequency 10')
-    self.Bind(wx.EVT_MENU, self.OnSmeterFrequencyB, item)
-    item = self.smeter_menu.Append(-1, 'Audio 1')
-    self.Bind(wx.EVT_MENU, self.OnSmeterAudioA, item)
-    item = self.smeter_menu.Append(-1, 'Audio 5')
-    self.Bind(wx.EVT_MENU, self.OnSmeterAudioB, item)
+    self.smeter_menu = QuiskMenu("smeter_menu")
+    self.smeter_menu.AppendRadioItem('S-meter 1', self.OnSmeterMeterA)
+    self.smeter_menu.AppendRadioItem('S-meter 5', self.OnSmeterMeterB)
+    self.smeter_menu.AppendRadioItem('Frequency 2',  self.OnSmeterFrequencyA)
+    self.smeter_menu.AppendRadioItem('Frequency 10', self.OnSmeterFrequencyB)
+    self.smeter_menu.AppendRadioItem('Audio 1', self.OnSmeterAudioA)
+    self.smeter_menu.AppendRadioItem('Audio 5', self.OnSmeterAudioB)
     # Make a popup menu for the memory buttons
     self.memory_menu = wx.Menu()
     # Place the buttons on the screen
@@ -5018,6 +4821,7 @@ class App(wx.App):
         span = 1
       col = 0
       for b in band_buttons[0:bmax]:
+        self.idName2Button[b.idName] = b
         gbs.Add(b, (1, button_start_col + col), (1, span), flag=flag)
         col += span
       while col < 14:
@@ -5026,14 +4830,21 @@ class App(wx.App):
         col += span
       col = button_start_col
       for b in left_row2:
-        gbs.Add(b, (2, col), (1, 2), flag=flag)
-        col += 2
+        self.idName2Button[b.idName] = b
+        if b.idName in ("Mute", "NR2"):
+          gbs.Add(b, (2, col), (1, 1), flag=flag)
+          col += 1
+        else:
+          gbs.Add(b, (2, col), (1, 2), flag=flag)
+          col += 2
       col = button_start_col
       for b in left_row3:
+        self.idName2Button[b.idName] = b
         gbs.Add(b, (3, col), (1, 2), flag=flag)
         col += 2
       col = 15
       for b in  self.modeButns.GetButtons():
+        self.idName2Button[b.idName] = b
         if col in (19, 20):		# single column
           gbs.Add(b, (1, button_start_col + col), flag=flag)
           col += 1
@@ -5042,11 +4853,16 @@ class App(wx.App):
           col += 2
       col = button_start_col + 15
       for i in range(0, 6):
-        gbs.Add(right_row2[i], (2, col), (1, 2), flag=flag)
-        gbs.Add(right_row3[i], (3, col), (1, 2), flag=flag)
+        b = right_row2[i]
+        gbs.Add(b, (2, col), (1, 2), flag=flag)
+        self.idName2Button[b.idName] = b
+        b = right_row3[i]
+        gbs.Add(b, (3, col), (1, 2), flag=flag)
+        self.idName2Button[b.idName] = b
         col += 2
       gbs.Add(b_onoff,      (0, button_start_col), (1, 1),
          flag=wx.EXPAND | wx.TOP | wx.BOTTOM, border=self.freqDisplay.border)
+      self.idName2Button[b_onoff.idName] = b_onoff
       gbs.Add(b_freqdisp,   (0, button_start_col + 1), (1, 5),
          flag=wx.EXPAND | wx.TOP | wx.BOTTOM, border=self.freqDisplay.border)
       gbs.Add(b_freqenter,  (0, button_start_col + 6), (1, 2), flag = wx.EXPAND|wx.LEFT|wx.RIGHT, border=5)
@@ -5067,7 +4883,7 @@ class App(wx.App):
         gbs.AddGrowableCol(i,1)
       for i in range(button_start_col + 15, button_start_col + 27):
         gbs.AddGrowableCol(i,1)
-    else:
+    else:	# Small screen
       gbs.Add(b_freqdisp, (0, button_start_col), (1, 6),
          flag=wx.EXPAND | wx.TOP | wx.BOTTOM, border=self.freqDisplay.border)
       gbs.Add(b_bandupdown, (0, button_start_col + 6), (1, 2), flag=wx.EXPAND)
@@ -5089,6 +4905,7 @@ class App(wx.App):
       row = 2
       col = button_start_col
       for b in self.filterButns.GetButtons():
+        self.idName2Button[b.idName] = b
         gbs.Add(b, (row, col), (1, 2), flag=flag)
         col += 2
 
@@ -5101,8 +4918,14 @@ class App(wx.App):
       row = 3
       col = 2
       for b in buttons:
-        gbs.Add(b, (row, button_start_col + col), (1, 2), flag=flag)
-        col += 2
+        if hasattr(b, "idName"):
+          self.idName2Button[b.idName] = b
+        if hasattr(b, "idName") and b.idName in ("Mute", "NR2"):
+          gbs.Add(b, (row, button_start_col + col), (1, 1), flag=flag)
+          col += 1
+        else:
+          gbs.Add(b, (row, button_start_col + col), (1, 2), flag=flag)
+          col += 2
         if col >= 12:
           row += 1
           col = 2
@@ -5228,10 +5051,10 @@ class App(wx.App):
   def SetFilterByMode(self, mode):
     index = self.modeFilter[mode]
     try:
-      bw = int(self.filterButns.buttons[index].GetLabel())
+      Lab = self.filterButns.buttons[index].GetLabel()
     except:
-      bw = int(self.filterButns.buttons[0].GetLabel())
-    self.OnBtnFilter(None, bw)
+      Lab = self.filterButns.buttons[0].GetLabel()
+    self.filterButns.SetLabel(Lab, True)
   def GetFilterCenter(self, mode, bandwidth):
     if mode in ('CWU', 'CWL'):
       center = max(conf.cwTone, bandwidth // 2)
@@ -5304,18 +5127,11 @@ class App(wx.App):
     if self.screen is self.filter_screen:
       self.screen.NewFilter()
   def OnFreedvMenu(self, event):
-    idd = event.GetId()
-    text = self.freedv_menu.GetLabel(idd)
-    if text[0:5] == 'Upper':
-      self.btnFreeDV.SetLabel('FDV-U')
-      self.btnFreeDV.Refresh()
-      self.OnBtnMode(None, 'FDV-U')
-      return
-    if text[0:5] == 'Lower':
-      self.btnFreeDV.SetLabel('FDV-L')
-      self.btnFreeDV.Refresh()
-      self.OnBtnMode(None, 'FDV-L')
-      return
+    text = ''
+    for item in self.freedv_menu.GetMenuItems():
+      if item.IsChecked():
+        text = item.GetItemLabel()
+        break
     for mode, index in conf.freedv_modes:
       if mode == text:
         break
@@ -5323,7 +5139,9 @@ class App(wx.App):
       print ("Failure in OnFreedvMenu")
       return
     mode = QS.freedv_set_options(mode=index)
-    if mode != index:		# change to new mode failed
+    if mode == index:
+      self.freedv_mode = text
+    elif not self.remote_control_slave:		# change to new mode failed
       self.freedv_menu_items[mode].Check(1)
       pos = (self.width//2, self.height//2)
       if index == 8:
@@ -5331,6 +5149,9 @@ class App(wx.App):
       else:
         dlg = wx.MessageDialog(self.main_frame, "No codec2 support for " + text, "FreeDV Modes", wx.OK, pos)
       dlg.ShowModal()
+    else:
+      self.freedv_menu_items[mode].Check(1)
+      print ("FreeDV change mode failed.")
   def OnBtnHelp(self, event):
     if event.GetEventObject().GetValue():
       self.OnBtnScreen(None, 'Help')
@@ -5386,11 +5207,9 @@ class App(wx.App):
     if name[0:5] == 'WFall':
       self.screen.SetSashPosition(sash)
   def OnBtnFileRecord(self, event):
-    if event.GetEventObject().GetValue():
-      QS.set_file_name(record_button=1)
-    else:
-      QS.set_file_name(record_button=0)
-  def ChangeYscale(self, event):
+    record = event.GetEventObject().GetValue()
+    self.config_screen.config.OnFileRecordButton(record)
+  def ChangeYscale(self, event=None):
     self.screen.ChangeYscale(self.sliderYs.GetValue())
     if self.screen == self.multi_rx_screen:
       if self.multi_rx_screen.rx_zero == self.waterfall:
@@ -5398,7 +5217,7 @@ class App(wx.App):
         self.wfallGrScaleZ[self.lastBand] = (self.waterfall.pane1.y_scale, self.waterfall.pane1.y_zero)
       elif self.multi_rx_screen.rx_zero == self.graph:
         self.graphScaleZ[self.lastBand] = (self.graph.y_scale, self.graph.y_zero)
-  def ChangeYzero(self, event):
+  def ChangeYzero(self, event=None):
     self.screen.ChangeYzero(self.sliderYz.GetValue())
     if self.screen == self.multi_rx_screen:
       if self.multi_rx_screen.rx_zero == self.waterfall:
@@ -5406,7 +5225,7 @@ class App(wx.App):
         self.wfallGrScaleZ[self.lastBand] = (self.waterfall.pane1.y_scale, self.waterfall.pane1.y_zero)
       elif self.multi_rx_screen.rx_zero == self.graph:
         self.graphScaleZ[self.lastBand] = (self.graph.y_scale, self.graph.y_zero)
-  def OnChangeZoom(self, event):
+  def OnChangeZoom(self, event=None):
     zoom_control = self.sliderZo.GetValue()
     if self.screen == self.bandscope_screen:
       self.bandscope_screen.ChangeZoom(zoom_control)
@@ -5583,12 +5402,13 @@ class App(wx.App):
     if self.split_rxtx:
       QS.set_split_rxtx(self.split_rxtx_play)
       self.txFreq = self.rxFreq + self.split_offset
+      self.ChangeHwFrequency(self.txFreq, self.VFO, 'OnSplit', event=event, rx_freq=self.rxFreq)
     else:
       QS.set_split_rxtx(0)
       self.split_offset = self.txFreq - self.rxFreq
       self.txFreq = self.rxFreq
+      self.ChangeHwFrequency(self.txFreq, self.VFO, 'OnSplit', event=event)
     self.screen.SetTxFreq(self.txFreq, self.rxFreq)
-    QS.set_tune(self.rxFreq + self.ritFreq, self.txFreq)
   def OnMenuSplitPlay1(self, event):
     self.split_rxtx_play = 1
     if self.split_rxtx:
@@ -5606,22 +5426,17 @@ class App(wx.App):
     if self.split_rxtx:
       QS.set_split_rxtx(4)
   def OnMenuSplitLock(self, event):
-    if self.split_locktx:
-      self.split_locktx = False
-      self.splitButton.SetLabel("Split")
-    else:
+    menu = self.split_menu
+    if menu.IsItemChecked('Lock Tx Frequency'):
       self.split_locktx = True
       self.splitButton.SetLabel("LkSplit")
+    else:
+      self.split_locktx = False
+      self.splitButton.SetLabel("Split")
     self.splitButton.Refresh()
   def OnMenuSplitRev(self, event):	# Called when the Split Reverse button is pressed
     if self.split_rxtx:
-      rx = self.rxFreq
-      self.rxFreq = self.txFreq
-      self.ChangeHwFrequency(rx, self.VFO, 'FreqEntry')
-  def OnMenuSplitCtlTx(self, event):
-    self.split_hamlib_tx = True
-  def OnMenuSplitCtlRx(self, event):
-    self.split_hamlib_tx = False
+      self.ChangeHwFrequency(self.rxFreq, self.VFO, 'FreqEntry', rx_freq=self.txFreq)
   def OnBtnRit(self, event=None):	# Called when the RIT check button is pressed
     # Caution: event can be None
     if self.ritButton.GetValue():
@@ -5706,6 +5521,7 @@ class App(wx.App):
   def OnBtnFilePlay(self, event):
     btn = event.GetEventObject()
     enable = btn.GetValue()
+    self.config_screen.config.OnFilePlayButton(enable)
     if enable:
       self.file_play_state = 1	# Start playing a file
       if self.file_play_source == 10:	# Play speaker audio file
@@ -5805,9 +5621,36 @@ class App(wx.App):
       QS.set_auto_notch(1)
     else:
       QS.set_auto_notch(0)
+  def OnBtnNR2(self, event):
+    btn = event.GetEventObject()
+    if btn.GetValue():
+      self.wdsp.put(self.wdsp.SetRXAEMNRRun, self.wdsp_channel, 1)
+      QS.wdsp_set_parameter(self.wdsp_channel, in_use=1)
+    else:
+      self.wdsp.put(self.wdsp.SetRXAEMNRRun, self.wdsp_channel, 0)
+  def OnMenuNB(self, event):
+    # menu is ("NB 1", "NB 2", "NB 3", "SNB")
+    for item in self.NB_menu.GetMenuItems():
+      if item.IsChecked():
+        text = item.GetItemLabel()
+        self.btnNB.SetLabel(text)
+        self.btnNB.Refresh()
+        break
+    self.OnBtnNB(None)
   def OnBtnNB(self, event):
-    index = event.GetEventObject().index
-    QS.set_noise_blanker(index)
+    text = self.btnNB.GetLabel()
+    if self.btnNB.GetValue():	# Noise blanker On
+      if text == "SNB":
+        QS.set_noise_blanker(0)
+        self.wdsp.put(self.wdsp.SetRXASNBARun, self.wdsp_channel, 1)
+        QS.wdsp_set_parameter(self.wdsp_channel, in_use=1)
+      else:
+        self.wdsp.put(self.wdsp.SetRXASNBARun, self.wdsp_channel, 0)
+        index = int(text[-1])
+        QS.set_noise_blanker(index)
+    else:	# Noise blanker Off
+      QS.set_noise_blanker(0)
+      self.wdsp.put(self.wdsp.SetRXASNBARun, self.wdsp_channel, 0)
   def FreqEntry(self, event):
     freq = event.GetString()
     win = event.GetEventObject()
@@ -5823,29 +5666,34 @@ class App(wx.App):
       vfo = freq - tune
       self.BandFromFreq(freq)
       self.ChangeHwFrequency(tune, vfo, 'FreqEntry')
-  def ChangeHwFrequency(self, tune, vfo, source='', band='', event=None):
+  def ChangeHwFrequency(self, tune, vfo, source='', band='', event=None, rx_freq=None):
     """Change the VFO and tuning frequencies, and notify the hardware.
 
-    tune:   the new tuning frequency in +- sample_rate/2;
-    vfo:    the new vfo frequency in Hertz; this is the RF frequency at zero Hz audio
-    source: a string indicating the source or widget requesting the change;
-    band:   if source is "BtnBand", the band requested;
-    event:  for a widget, the event (used to access control/shift key state).
+    tune:    the new tuning frequency in +- sample_rate/2;
+    vfo:     the new vfo frequency in Hertz; this is the RF frequency at zero Hz audio
+    source:  a string indicating the source or widget requesting the change;
+    band:    if source is "BtnBand", the band requested;
+    event:   for a widget, the event (used to access control/shift key state).
+    rx_freq: the new changed value of App.rxFreq, the receive frequency in +- sample_rate/2
 
     Try to update the hardware by calling Hardware.ChangeFrequency().
     The hardware will reply with the updated frequencies which may be different
     from those requested; use and display the returned tune and vfo.
     """
+    if not self.split_rxtx:
+      self.rxFreq = tune	# rxFreq must be correct before the call to Hardware.ChangeFrequency()
+    elif rx_freq is not None:
+      self.rxFreq = rx_freq
     if self.screen == self.bandscope_screen:
       freq = vfo + tune
       tune = freq % 10000
       vfo = freq - tune
     tune, vfo = Hardware.ChangeFrequency(vfo + tune, vfo, source, band, event)
-    self.ChangeDisplayFrequency(tune - vfo, vfo)
-  def ChangeDisplayFrequency(self, tune, vfo):
+    self.ChangeDisplayFrequency(tune - vfo, vfo, rx_freq is not None)
+  def ChangeDisplayFrequency(self, tune, vfo, new_rxfreq=False):
     'Change the frequency displayed by Quisk'
     change = 0
-    if tune != self.txFreq:
+    if tune != self.txFreq or new_rxfreq:
       change = 1
       self.txFreq = tune
       if not self.split_rxtx:
@@ -5887,14 +5735,24 @@ class App(wx.App):
       self.ChangeHwFrequency(tune, vfo, 'FreqEntry')
     if rx_freq and self.split_rxtx:		# Frequency must be on-screen
       tune = rx_freq - self.VFO
-      self.rxFreq = tune
-      self.screen.SetTxFreq(self.txFreq, tune)
-      QS.set_tune(tune + self.ritFreq, self.txFreq)
-  def OnBtnMode(self, event, mode=None):
-    if event is None:	# called by application
-      self.modeButns.SetLabel(mode)
-    else:		# called by button
-      mode = self.modeButns.GetLabel()
+      self.ChangeHwFrequency(self.txFreq, self.VFO, 'FreqEntry', rx_freq=tune)
+  def OnBtnMode(self, event):
+    mode = self.modeButns.GetLabel()
+    delta = 0	# Change frequency so switch between CW and SSB keeps tone constant
+    if self.mode == 'USB':
+      if mode in ('CWL', 'CWU'):
+        delta = 1
+    elif self.mode == 'LSB':
+      if mode in ('CWL', 'CWU'):
+        delta = -1
+    elif self.mode in ('CWL', 'CWU'):
+      if mode == 'USB':
+        delta = -1
+      elif mode == 'LSB':
+        delta = 1
+    if delta:
+      delta *= conf.cwTone
+      self.ChangeRxTxFrequency(self.rxFreq + delta + self.VFO, self.txFreq + delta + self.VFO)
     Hardware.ChangeMode(mode)
     self.mode = mode
     self.MakeFilterButtons(self.Mode2Filters(mode))
@@ -5948,7 +5806,7 @@ class App(wx.App):
     else:
       return
     if band == self.lastBand:	# leave band unchanged
-      self.OnBtnMode(None, mode)
+      self.modeButns.SetLabel(mode, True)
       self.ChangeHwFrequency(txfreq, vfo, 'FreqEntry')
     else:		# change to new band
       self.bandState[band] = (vfo, txfreq, mode)
@@ -5974,7 +5832,7 @@ class App(wx.App):
     else:
       freq, band, vfo, txfreq, mode = self.memoryState[0]
     if band == self.lastBand:	# leave band unchanged
-      self.OnBtnMode(None, mode)
+      self.modeButns.SetLabel(mode, True)
       self.ChangeHwFrequency(txfreq, vfo, 'FreqEntry')
     else:		# change to new band
       self.bandState[band] = (vfo, txfreq, mode)
@@ -6055,7 +5913,7 @@ class App(wx.App):
       tune = freq - vfo
     elif band == 'Time':
       vfo, tune, mode = conf.bandTime[btn.index]
-    self.OnBtnMode(None, mode)
+    self.modeButns.SetLabel(mode, True)
     self.txFreq = self.VFO = -1		# demand change
     self.ChangeBand(band)
     self.ChangeHwFrequency(tune, vfo, 'BtnBand', band=band)
@@ -6085,10 +5943,12 @@ class App(wx.App):
           vfo, tune, mode = self.bandState[band]
         except KeyError:
           vfo, tune, mode = (0, 0, 'LSB')
-        self.OnBtnMode(None, mode)
+        self.modeButns.SetLabel(mode, True)
         self.ChangeBand(band)
         break
   def ChangeBand(self, band):
+    if self.remote_control_head:
+      self.Hardware.RemoteCtlSend(f'JsonAppFunc;{json.dumps(("ChangeBand", band))}\n')
     Hardware.ChangeBand(band)
     s, z = self.graphScaleZ.get(band, (conf.graph_y_scale, conf.graph_y_zero))
     self.waterfall.SetPane1(self.wfallGrScaleZ.get(band, (s, z)))
@@ -6144,7 +6004,7 @@ class App(wx.App):
     self.band_up_down = 0
     tune = self.txFreq
     vfo = self.VFO
-    self.txFreq = self.VFO = 0		# Force an update
+    self.txFreq = self.VFO = -1		# Force an update
     self.ChangeHwFrequency(tune, vfo, 'BtnUpDown')
   def SearchFreqAmPh(self, freq, data, index):
     # If index is -1, search data for the VFO frequency.
@@ -6263,10 +6123,10 @@ class App(wx.App):
     return ampl, phase
   def PostStartup(self):	# called once after sound attempts to start
     self.config_screen.OnGraphData(None)	# update config in case sound is not running
-    txt = self.sound_thread.config_text		# change config_text if StartSamples() returns a string
-    if txt:
-      self.config_text = txt
-      self.main_frame.SetConfigText(txt)
+    #txt = self.sound_thread.config_text		# change config_text if StartSamples() returns a string
+    #if txt:
+    #  self.config_text = txt
+    #  self.main_frame.SetConfigText(txt)
   def FldigiPoll(self):		# Keep Quisk and Fldigi frequencies equal; control Fldigi PTT from Quisk
     if self.fldigi_server is None:
       return
@@ -6323,20 +6183,39 @@ class App(wx.App):
       except socket.error:
         pass
       else:
-        # print 'Connection from', address
+        # print ('Connection from', address)
         self.hamlib_clients.append(HamlibHandlerRig2(self, conn, address))
       for client in self.hamlib_clients:	# Service existing clients
         if not client.Process():		# False return indicates a closed connection; remove the handler for this client
           self.hamlib_clients.remove(client)
           # print 'Remove', client.address
           break
-  def OnHotKey(self, event=None):	# This is only used if the hot key does NOT work when Quisk is hidden.
-    if event:
-      event.Skip()
-      self.hot_key_ptt_change = True
-      self.hot_key_ptt_is_down = True
-    elif self.hot_key_ptt_is_down and not wx.GetKeyState(conf.hot_key_ptt1):
-      self.hot_key_ptt_is_down = False
+  def OnKeyHook(self, event):
+    event.Skip()
+    if conf.hot_key_ptt_if_hidden:	# Hot key PTT operates even if Quisk is hidden
+      return	# Poll key with HotKeyPoll()
+    ptt1 = conf.hot_key_ptt1
+    if not ptt1:
+      return
+    if 97 <= ptt1 <= 122:       # Lower case
+      ptt1 -= 32        # Convert to upper case
+    if event.GetKeyCode() == ptt1:
+      ptt2 = conf.hot_key_ptt2
+      hit = False
+      if ptt2 is None or ptt2 == wx.ACCEL_NORMAL:
+        hit = True
+      elif ptt2 == wx.ACCEL_SHIFT:
+        hit = event.ShiftDown()
+      elif ptt2 == wx.ACCEL_CTRL:
+        hit = event.ControlDown()
+      elif ptt2 == wx.ACCEL_ALT:
+        hit = event.AltDown()
+      elif ptt2 == wx.ACCEL_SHIFT | wx.ACCEL_CTRL:
+        hit = event.ShiftDown() and event.ControlDown()
+      else:
+        hit = True
+      if hit:		# Repeated key press events will occur
+        self.hot_key_ptt_pressed = True
   def HotKeyPoll(self):		# This is only used if the hot key DOES work when Quisk is hidden.
     if wx.GetKeyState(conf.hot_key_ptt1):
       ptt2 = conf.hot_key_ptt2
@@ -6354,7 +6233,8 @@ class App(wx.App):
         self.hot_key_ptt_is_down = True
     else:
       self.hot_key_ptt_is_down = False
-    self.hot_key_ptt_change = self.hot_key_ptt_is_down and not self.hot_key_ptt_was_down
+    if self.hot_key_ptt_is_down and not self.hot_key_ptt_was_down:
+      self.hot_key_ptt_pressed = True
   def OnReadSound(self):	# called at frequent intervals
     #if sys.platform == 'win32':
     #  self.main_frame.Update()
@@ -6362,6 +6242,8 @@ class App(wx.App):
       self.hamlib_com1_handler.Process()
     if self.hamlib_com2_handler:
       self.hamlib_com2_handler.Process()
+    if self.use_fast_heart_beat:
+      Hardware.FastHeartBeat()
     if conf.do_repeater_offset:
       hold = QS.tx_hold_state(-1)
       if hold == 2:	# Tx is being held for an FM repeater TX frequency shift
@@ -6408,22 +6290,22 @@ class App(wx.App):
       if conf.hot_key_ptt1 and self.screen != self.config_screen:
         if conf.hot_key_ptt_if_hidden:	# hot key PTT operates even if Quisk is hidden
           self.HotKeyPoll()
-        else:
-          self.OnHotKey()
         if conf.hot_key_ptt_toggle:
-          if self.hot_key_ptt_change:
+          if self.hot_key_ptt_pressed:	# Key down event was received
             ptt = not ptt_button_down
             if ptt:
               self.TurnOffFilePlay()
         else:
-          if self.hot_key_ptt_is_down:
+          if self.hot_key_ptt_pressed:	# Multiple key down events are being received
             ptt = True
+            self.hot_key_ptt_active = True
             if not ptt_button_down:
               self.TurnOffFilePlay()
-          elif self.hot_key_ptt_was_down:
+          elif self.hot_key_ptt_active and not wx.GetKeyState(conf.hot_key_ptt1):
             ptt = False
+            self.hot_key_ptt_active = False
         self.hot_key_ptt_was_down = self.hot_key_ptt_is_down
-        self.hot_key_ptt_change = False
+        self.hot_key_ptt_pressed = False
       if ptt is True and not ptt_button_down:
         self.SetPTT(True)
       elif ptt is False and ptt_button_down:
@@ -6439,12 +6321,13 @@ class App(wx.App):
       if data and self.screen == self.bandscope_screen:
         self.screen.OnGraphData(data)
     if self.screen == self.scope:
-      data = QS.get_graph(0, 1.0, 0)	# get raw data
+      # Get raw data, not FFT
+      data = QS.get_graph(0, 1.0, 0)
       if data:
         self.scope.OnGraphData(data)			# Send message to draw new data
         return 1		# we got new graph/scope data
     elif self.screen == self.audio_fft_screen:
-      data = QS.get_graph(1, self.zoom, float(self.zoom_deltaf))	# get FFT data and discard
+      QS.get_graph(2, self.zoom, float(self.zoom_deltaf))	# discard data
       audio_data = QS.get_audio_graph()		# Display the audio FFT
       if audio_data:
         self.screen.OnGraphData(audio_data)
@@ -6452,7 +6335,11 @@ class App(wx.App):
       data = QS.get_graph(1, self.zoom, float(self.zoom_deltaf))	# get FFT data
       if data:
         #T('')
-        if self.screen == self.bandscope_screen:
+        if self.remote_control_slave:
+          Hardware.RemoteCtlSend("M;%s\n" % self.smeter.GetLabel())
+        if self.remote_control_head:
+          self.smeter.SetLabel(Hardware.GetSmeter())
+        elif self.screen == self.bandscope_screen:
           d = QS.get_hermes_adc()	# ADC level from bandscope, 0.0 to 1.0
           if d < 1E-10:
             d = 1E-10
@@ -6532,6 +6419,22 @@ class App(wx.App):
           QS.set_record_state(5)		# Start another playback
           self.file_play_state = 1
           self.SetPTT(True)
+  def OnReadMIDI(self, byts):
+    for byt in byts:
+      if byt & 0x80:		# this is a status byte and the start of a new message
+        self.midi_message = [byt]
+      else:
+        self.midi_message.append(byt)
+      if len(self.midi_message) == 3:
+        if self.config_midi_window:
+          self.config_midi_window.OnNewMidiNote(self.midi_message)
+    if self.midi_handler is None:
+      if hasattr(conf, 'MidiHandler'):
+        self.midi_handler = conf.MidiHandler(self, conf)
+      else:
+        import midi_handler
+        self.midi_handler = midi_handler.MidiHandler(self, conf)
+    self.midi_handler.OnReadMIDI(byts)
 
 def main():
   """If quisk is installed as a package, you can run it with quisk.main()."""

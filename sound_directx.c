@@ -1,10 +1,12 @@
+#ifdef QUISK_HAVE_DIRECTX
+
 #include <Python.h>
 #include <complex.h>
 #include <math.h>
 #include "quisk.h"
 #include "dsound.h"
 //#include <audiodefs.h>
-#include <Mmreg.h>
+#include <mmreg.h>
 //#include <ksmedia.h>
 //#include <uuids.h>
 #include <stdint.h>
@@ -171,7 +173,8 @@ static void MakeWFext(int use_new, int use_float, struct sound_dev * dev, WAVEFO
 	pwfex->Format.nChannels = dev->num_channels;
 	pwfex->Format.nSamplesPerSec = dev->sample_rate;
 	pwfex->Format.nAvgBytesPerSec = dev->num_channels * dev->sample_rate * dev->sample_bytes;
-	dev->play_buf_size = pwfex->Format.nAvgBytesPerSec * quisk_sound_state.latency_millisecs / 1000 * 2;
+	dev->play_buf_bytes = pwfex->Format.nAvgBytesPerSec * quisk_sound_state.latency_millisecs / 1000 * 2;
+	dev->play_buf_size = dev->play_buf_bytes / (dev->num_channels * dev->sample_bytes);
 	pwfex->Format.nBlockAlign = dev->num_channels * dev->sample_bytes;
 	pwfex->Format.wBitsPerSample = dev->sample_bytes * 8;
 }
@@ -214,7 +217,7 @@ static int quisk_open_capture(struct sound_dev * dev)
 	memset(&dscbd, 0, sizeof(DSCBUFFERDESC));
 	dscbd.dwSize = sizeof(DSCBUFFERDESC);
 	dscbd.dwFlags = 0;
-	dscbd.dwBufferBytes = dev->play_buf_size;
+	dscbd.dwBufferBytes = dev->play_buf_bytes;
 	dscbd.lpwfxFormat = (WAVEFORMATEX *)&wfex;
 	hr = IDirectSoundCapture_CreateCaptureBuffer(
 		(LPDIRECTSOUNDCAPTURE8)dev->handle, &dscbd, &ptBuf, NULL);
@@ -240,7 +243,7 @@ static int quisk_open_capture(struct sound_dev * dev)
 			dev->sample_rate, dev->channel_I, dev->channel_Q);
                 QuiskPrintf("  Number of channels %d, bytes per sample %d\n", dev->num_channels, dev->sample_bytes);
 		QuiskPrintf("Created capture buffer size %d bytes for device %s, descr %s\n",
-			dev->play_buf_size, dev->name, dev->stream_description);
+			dev->play_buf_bytes, dev->name, dev->stream_description);
 	}
 	return 0;
 }
@@ -287,7 +290,7 @@ static int quisk_open_playback(struct sound_dev * dev)
 	memset(&dsbdesc, 0, sizeof(DSBUFFERDESC));
 	dsbdesc.dwSize = sizeof(DSBUFFERDESC); 
 	dsbdesc.dwFlags = DSBCAPS_GETCURRENTPOSITION2|DSBCAPS_GLOBALFOCUS;
-	dsbdesc.dwBufferBytes = dev->play_buf_size;
+	dsbdesc.dwBufferBytes = dev->play_buf_bytes;
 	dsbdesc.lpwfxFormat = (LPWAVEFORMATEX)&wfex;
 	hr = IDirectSound_CreateSoundBuffer(
 		(LPDIRECTSOUND8)dev->handle, &dsbdesc, &ptBuf, NULL); 
@@ -304,12 +307,12 @@ static int quisk_open_playback(struct sound_dev * dev)
 			dev->sample_rate, dev->channel_I, dev->channel_Q);
                 QuiskPrintf("  Number of channels %d, bytes per sample %d\n", dev->num_channels, dev->sample_bytes);
 		QuiskPrintf("Created play buffer size %d bytes for device %s, descr %s\n",
-			dev->play_buf_size, dev->name, dev->stream_description);
+			dev->play_buf_bytes, dev->name, dev->stream_description);
 	}
 	return 0;
 }
 
-PyObject * quisk_sound_devices(PyObject * self, PyObject * args)
+PyObject * quisk_directx_sound_devices(PyObject * self, PyObject * args)
 {	// Return a list of DirectSound device names
 	PyObject * pylist, * pycapt, * pyplay;
 
@@ -400,7 +403,7 @@ int  quisk_read_directx(struct sound_dev * dev, complex double * cSamples)
         if (readPos >= dev->dataPos)
 	        bytes = readPos - dev->dataPos;
         else
-	        bytes = readPos - dev->dataPos + dev->play_buf_size;
+	        bytes = readPos - dev->dataPos + dev->play_buf_bytes;
 	frames = bytes / bytes_per_frame;	// frames available to read
 	dev->dev_latency = frames;
 //if (dev->dev_index == t_Capture) QuiskPrintf("Read %d frames\n", frames);
@@ -423,8 +426,8 @@ int  quisk_read_directx(struct sound_dev * dev, complex double * cSamples)
 		QuiskPrintf ("Lock not equal to bytes\n");
 #endif
 	dev->dataPos += bytes;
-        if (dev->dataPos >= dev->play_buf_size)
-                dev->dataPos -= dev->play_buf_size;
+        if (dev->dataPos >= dev->play_buf_bytes)
+                dev->dataPos -= dev->play_buf_bytes;
 	nSamples = 0;
 	switch (dev->sound_format) {
 	case Int16:
@@ -531,10 +534,12 @@ void quisk_play_directx(struct sound_dev * dev, int nSamples,
 	}
 	unavail = (int)writePos - (int)playPos;   // Must not write to this region
 	if (unavail < 0)
-		unavail += dev->play_buf_size;
+		unavail += dev->play_buf_bytes;
         dev->play_delay = dev->dataPos - playPos;       // includes unavail
         if (dev->play_delay < 0)
-                dev->play_delay += dev->play_buf_size;
+                dev->play_delay += dev->play_buf_bytes;
+	dev->cr_average_fill += ((double)(dev->play_delay - unavail) / bytes_per_frame + nSamples / 2) / (2 * dev->latency_frames);
+	dev->cr_average_count++;
         // buffer_fill is (the writable play samples plus the current samples) / (2 * latency_frames)
         // so 0.5 filled represents the target level of dev->latency_frames
 	buffer_fill = ((float)(dev->play_delay - unavail) / bytes_per_frame + nSamples) / (2 * dev->latency_frames);
@@ -547,20 +552,22 @@ void quisk_play_directx(struct sound_dev * dev, int nSamples,
 			        QuiskPrintf ("Start DirectX play at dev->latency_frames %d\n", dev->latency_frames);
 		}
 		break;
-	case 1:	// Normal run state
+	case 1: // Normal run state
+		// Measure the space available to write samples
+		frames = (dev->play_buf_bytes - dev->play_delay - unavail) / bytes_per_frame;
 		// Check for underrun
-	        if (dev->play_delay > dev->old_play_delay) {            // the writePos crossed over the dataPos
+		n = unavail / bytes_per_frame + dev->latency_frames * 2 / 10 - nSamples;   // minimum frames
+		if (dev->dev_latency < n) {
 			quisk_sound_state.underrun_error++;
 			dev->dev_underrun++;
 			if (quisk_sound_state.verbose_sound)
 				QuiskPrintf ("Underrun error for %s\n", dev->stream_description);
-			for (nSamples = 0; nSamples < dev->latency_frames; nSamples++)
-				cSamples[nSamples] = 0;   // fill with silence
-			dev->dataPos = writePos;
-			dev->play_delay = unavail;
+			n += dev->latency_frames * 2 / 10;
+			while (n-- > 0)
+				cSamples[nSamples++] = 0;   // add zero samples
 		}
-		// Check if play buffer is too full.
-		else if (buffer_fill >= 1.0) {
+		// Check if play buffer is too full
+		else if (dev->dev_latency > dev->latency_frames * 18 / 10 || nSamples >= frames) {
 			quisk_sound_state.write_error++;
 			dev->dev_error++;
 			if (quisk_sound_state.verbose_sound)
@@ -568,20 +575,6 @@ void quisk_play_directx(struct sound_dev * dev, int nSamples,
 			nSamples = 0;
 			dev->started = 2;
 		}
-	        else if (buffer_fill > 0.7 && nSamples >= 1) {
-		        nSamples--;
-#if DEBUG_IO
-		        QuiskPrintf("play_alsa %s: Remove a sample\n", dev->stream_description);
-#endif
-	        }
-	        else if(buffer_fill < 0.3 && nSamples >= 2) {
-		        cSamples[nSamples] = cSamples[nSamples - 1];
-		        cSamples[nSamples - 1] = (cSamples[nSamples - 2] + cSamples[nSamples]) / 2.0;
-		        nSamples++;
-#if DEBUG_IO
-		        QuiskPrintf ("play_alsa %s: Add a sample\n", dev->stream_description);
-#endif
-	        }
 		break;
 	case 2:	 // Buffer is too full; wait for it to drain
 		if (buffer_fill <= 0.5) {
@@ -659,16 +652,56 @@ void quisk_play_directx(struct sound_dev * dev, int nSamples,
 	}
 	IDirectSoundBuffer8_Unlock(ptBuf, pt1, n1, pt2, n2);
 	dev->dataPos += bytes;	// update data write position
-	if (dev->dataPos >= dev->play_buf_size)
-		dev->dataPos -= dev->play_buf_size;
+	if (dev->dataPos >= dev->play_buf_bytes)
+		dev->dataPos -= dev->play_buf_bytes;
 	dev->dev_latency = dev->play_delay / bytes_per_frame;		// frames in buffer available to play
 	if (report_latency)			// Report latency for main playback device
 		quisk_sound_state.latencyPlay = dev->dev_latency;
 	dev->play_delay += bytes;		// bytes available to play
         dev->old_play_delay = dev->play_delay;
 }
+#else		// No directx available
+#include <Python.h>
+#include <complex.h>
+#include "quisk.h"
 
-void quisk_mixer_set(char * card_name, int numid, PyObject * value, char * err_msg, int err_size)
+PyObject * quisk_directx_sound_devices(PyObject * self, PyObject * args)
 {
-	err_msg[0] = 0;
+	return quisk_dummy_sound_devices(self, args);
 }
+
+void quisk_start_sound_directx (struct sound_dev ** pCapture, struct sound_dev ** pPlayback)
+{
+	struct sound_dev * pDev;
+	const char * msg = "No driver support for this device";
+
+	while (*pCapture) {
+		pDev = *pCapture++;
+		if (pDev->driver == DEV_DRIVER_DIRECTX) {
+			strMcpy(pDev->dev_errmsg, msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				QuiskPrintf("%s\n", msg);
+		}
+	}
+	while (*pPlayback) {
+		pDev = *pPlayback++;
+		if (pDev->driver == DEV_DRIVER_DIRECTX) {
+			strMcpy(pDev->dev_errmsg, msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				QuiskPrintf("%s\n", msg);
+		}
+	}
+}
+
+int  quisk_read_directx(struct sound_dev * dev, complex double * cSamples)
+{
+	return 0;
+}
+
+void quisk_play_directx(struct sound_dev * dev, int nSamples, complex double * cSamples, int report_latency, double volume)
+{}
+
+void quisk_close_sound_directx(struct sound_dev ** pCapture, struct sound_dev ** pPlayback)
+{}
+
+#endif

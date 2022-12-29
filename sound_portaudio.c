@@ -1,6 +1,8 @@
 /*
  * This module provides sound access for QUISK using the portaudio library.
 */
+#ifdef QUISK_HAVE_PORTAUDIO
+
 #include <Python.h>
 #include <complex.h>
 #include <math.h>
@@ -66,8 +68,8 @@ int quisk_read_portaudio(struct sound_dev * dev, complex double * cSamples)
 void quisk_play_portaudio(struct sound_dev * playdev, int nSamples, complex double * cSamples,
 		int report_latency, double volume)
 {	// play the samples; write them to the portaudio soundcard
-	int i, n, index;
-	long delay;
+	int i, n;
+	long delay, write_available;
 	float fi, fq;
 	PaError error;
 
@@ -75,69 +77,73 @@ void quisk_play_portaudio(struct sound_dev * playdev, int nSamples, complex doub
 		return;
 
 	// "delay" is the number of samples left in the play buffer
-	delay = playdev->play_buf_size - Pa_GetStreamWriteAvailable(playdev->handle);
-	//printf ("play available %ld\n", Pa_GetStreamWriteAvailable(playdev->handle));
+	write_available = Pa_GetStreamWriteAvailable(playdev->handle);
+	delay = playdev->play_buf_size - write_available;
+	playdev->cr_average_fill += (double)(delay + nSamples / 2) / (playdev->latency_frames * 2);
+	playdev->cr_average_count++;
 	playdev->dev_latency = delay;
 	if (report_latency) {		// Report for main playback device
 		quisk_sound_state.latencyPlay = delay;
 	}
-//printf ("nSamples %d, delay %ld\n", nSamples, delay);
-	index = 0;
-#if 0
-	// Timing is too crude to support this logic
-	if (nSamples + delay > playdev->latency_frames * 9 / 10) {
-		nSamples--;
-#if DEBUG_IO
-		printf("Remove a sample %s nSamples %4d  delay %4d  total %4d\n", playdev->name, nSamples, (int)delay, nSamples + (int)delay);
-#endif
+	switch(playdev->started) {
+	case 0:	 // Starting state
+		playdev->started = 1;
+		nSamples = playdev->latency_frames - delay;
+		for (i = 0; i < nSamples; i++)
+			cSamples[i] = 0;
+		break;
+	case 1:	// Normal run state
+		// Check if play buffer is too full.
+		if (nSamples > write_available) {
+			quisk_sound_state.write_error++;
+			playdev->dev_error++;
+			if (quisk_sound_state.verbose_sound)
+				QuiskPrintf ("Buffer too full for %s\n", playdev->stream_description);
+			nSamples = 0;
+			playdev->started = 2;
+		}
+		break;
+	case 2:	 // Buffer is too full; wait for it to drain
+		if (delay < playdev->latency_frames) {
+			playdev->started = 1;
+			if (quisk_sound_state.verbose_sound)
+				QuiskPrintf("Resume adding samples for %s\n", playdev->stream_description);
+		}
+		else {
+			nSamples = 0;
+		}
+		break;
 	}
-	else if(nSamples + delay < playdev->latency_frames * 5 / 10) {
-		cSamples[nSamples] = cSamples[nSamples - 1];
-		nSamples++;
-#if DEBUG_IO
-		printf("Add    a sample %s nSamples %4d  delay %4d  total %4d\n", playdev->name, nSamples, (int)delay, nSamples + (int)delay);
-#endif
-	}
-#endif
-	if (nSamples + delay > playdev->latency_frames) {		// too many samples
-		index = nSamples + delay - playdev->latency_frames;	// write only the most recent samples
-		if (index > nSamples)
-			index = nSamples;
-		quisk_sound_state.write_error++;
-		playdev->dev_error++;
-#if DEBUG_IO
-		printf("Discard %d of %d samples at %d delay\n", index, nSamples, (int)delay);
-#endif
-		if (nSamples == index)		// no samples to play
-			return;
-	}
-	else if (delay < 16) {		// Buffer is too empty; fill it back up with zeros.
-		n = playdev->latency_frames * 7 / 10 - nSamples;
-#if DEBUG_IO
-		printf("Add %d zero samples at %ld delay\n", n, delay);
-#endif
-		for (i = 0; i < n; i++)
-			cSamples[nSamples++] = 0;
-	}
-	for (i = 0, n = index; n < nSamples; i += playdev->num_channels, n++) {
+	if (nSamples <= 0)
+		return;
+	for (i = 0, n = 0; n < nSamples; i += playdev->num_channels, n++) {
 		fi = volume * creal(cSamples[n]);
 		fq = volume * cimag(cSamples[n]);
 		fbuffer[i + playdev->channel_I] = fi / CLIP32;
 		fbuffer[i + playdev->channel_Q] = fq / CLIP32;
 	}
-	error = Pa_WriteStream ((PaStream * )playdev->handle, fbuffer, nSamples - index);
-//printf ("Write %d\n", nSamples - index);
+	error = Pa_WriteStream ((PaStream * )playdev->handle, fbuffer, nSamples);
 	if (error == paNoError)
 		;
 	else if (error == paOutputUnderflowed) {
+		if (quisk_sound_state.verbose_sound)
+			printf("Underrun for %s\n", playdev->stream_description);
 		quisk_sound_state.underrun_error++;
 		playdev->dev_underrun++;
+		nSamples = playdev->latency_frames - nSamples;	// add zeros to fill back up to half full
+		if (nSamples > 0) {
+			for (i = 0, n = 0; n < nSamples; i += playdev->num_channels, n++) {
+				fbuffer[i + playdev->channel_I] = 0;
+				fbuffer[i + playdev->channel_Q] = 0;
+			}
+			Pa_WriteStream ((PaStream * )playdev->handle, fbuffer, nSamples);
+		}
 	}
 	else {
 		quisk_sound_state.write_error++;
 		playdev->dev_error++;
 #if DEBUG_IO
-		printf ("Play error: %s\n", Pa_GetErrorText(error));
+		printf ("Portaudio play error: %s\n", Pa_GetErrorText(error));
 #endif
 	}
 }
@@ -218,7 +224,7 @@ static int quisk_pa_name2index (struct sound_dev * dev, int is_capture)
 			dev->portaudio_index = Pa_GetDefaultInputDevice();
 		else
 			dev->portaudio_index = Pa_GetDefaultOutputDevice();
-		strncpy (dev->msg1, "Using default portaudio device", QUISK_SC_SIZE);
+		strMcpy (dev->msg1, "Using default portaudio device", QUISK_SC_SIZE);
 		return 0;
 	}
 	if ( ! strncmp (dev->name, "portaudio#", 10)) {		// Integer index follows "#"
@@ -230,7 +236,10 @@ static int quisk_pa_name2index (struct sound_dev * dev, int is_capture)
 		}
 		else {
 			snprintf (quisk_sound_state.err_msg, QUISK_SC_SIZE,
-				"Can not find portaudio device number %s", dev->name + 10);
+				"Error: Can not find portaudio device number %s", dev->name + 10);
+			strMcpy(dev->dev_errmsg, quisk_sound_state.err_msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				printf("%s\n", quisk_sound_state.err_msg);
 		}
 		return 1;
 	}
@@ -239,7 +248,7 @@ static int quisk_pa_name2index (struct sound_dev * dev, int is_capture)
 		count = Pa_GetDeviceCount();		// Search for string in device name
 		for (i = 0; i < count; i++) {
 			pInfo = Pa_GetDeviceInfo(i);
-			if (pInfo && (strstr(pInfo->name, dev->name + 10) || strstr(dev->name+10, pInfo->name))) {
+			if (pInfo && strstr(pInfo->name, dev->name + 10)) {
 				dev->portaudio_index = i;
 				snprintf (dev->msg1, QUISK_SC_SIZE, "PortAudio device %s",  pInfo->name);
 				break;
@@ -247,13 +256,19 @@ static int quisk_pa_name2index (struct sound_dev * dev, int is_capture)
 		}
 		if (dev->portaudio_index == -1)	{	// Error
 			snprintf (quisk_sound_state.err_msg, QUISK_SC_SIZE,
-				"Can not find portaudio device named %s", dev->name + 10);
+				"Error: Can not find portaudio device named %s", dev->name + 10);
+			strMcpy(dev->dev_errmsg, quisk_sound_state.err_msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				printf("%s\n", quisk_sound_state.err_msg);
 			return 1;
 		}
 		return 0;
 	}
 	snprintf (quisk_sound_state.err_msg, QUISK_SC_SIZE,
-		"Did not recognize portaudio device %.90s", dev->name);
+		"Error: Did not recognize portaudio device %.90s", dev->name);
+	strMcpy(dev->dev_errmsg, quisk_sound_state.err_msg, QUISK_SC_SIZE);
+	if (quisk_sound_state.verbose_sound)
+		printf("%s\n", quisk_sound_state.err_msg);
 	return 1;
 }
 
@@ -263,11 +278,16 @@ static int quisk_open_portaudio (struct sound_dev * cDev, struct sound_dev * pDe
 	PaStreamParameters cParams, pParams;
 	PaError error;
 	PaStream * hndl;
+	const PaStreamInfo * ptStreamInfo;
+	char * indent;
 
 	info_portaudio (cDev, pDev);
 
 	if (pDev && cDev && pDev->sample_rate != cDev->sample_rate) {
-		strncpy(quisk_sound_state.err_msg, "Capture and Play sample rates must be equal.", QUISK_SC_SIZE);
+		strMcpy(quisk_sound_state.err_msg, "Capture and Play sample rates must be equal.", QUISK_SC_SIZE);
+		strMcpy(cDev->dev_errmsg, quisk_sound_state.err_msg, QUISK_SC_SIZE);
+		if (quisk_sound_state.verbose_sound)
+			printf("%s\n", quisk_sound_state.err_msg);
 		return 1;
 	}
 
@@ -276,7 +296,18 @@ static int quisk_open_portaudio (struct sound_dev * cDev, struct sound_dev * pDe
 	cParams.hostApiSpecificStreamInfo = NULL;
 	pParams.hostApiSpecificStreamInfo = NULL;
 
+	if (cDev && pDev) {
+		indent = "  ";
+		if (quisk_sound_state.verbose_sound)
+			printf("Open duplex PortAudio device\n");
+	}
+	else {
+		indent = "";
+	}
 	if (cDev) {
+		if (quisk_sound_state.verbose_sound)
+			printf("%sOpen PortAudio capture device index %d name %s for %s\n",
+				indent, cDev->portaudio_index, cDev->name, cDev->stream_description);
 		cDev->handle = NULL;
 		cParams.device = cDev->portaudio_index;
 		cParams.channelCount = cDev->num_channels;
@@ -284,6 +315,9 @@ static int quisk_open_portaudio (struct sound_dev * cDev, struct sound_dev * pDe
 	}
 
 	if (pDev) {
+		if (quisk_sound_state.verbose_sound)
+			printf("%sOpen PortAudio play device index %d name %s for %s\n",
+				indent, pDev->portaudio_index, pDev->name, pDev->stream_description);
 		pDev->handle = NULL;
 		pParams.device = pDev->portaudio_index;
 		pParams.channelCount = pDev->num_channels;
@@ -294,39 +328,51 @@ static int quisk_open_portaudio (struct sound_dev * cDev, struct sound_dev * pDe
 		error = Pa_OpenStream (&hndl, &cParams, &pParams,
 				(double)cDev->sample_rate, cDev->read_frames, 0, NULL, NULL);
 		pDev->handle = cDev->handle = (void *)hndl;
+		if (error != paNoError) {
+			strMcpy(quisk_sound_state.err_msg, Pa_GetErrorText(error), QUISK_SC_SIZE);
+			strMcpy(cDev->dev_errmsg, quisk_sound_state.err_msg, QUISK_SC_SIZE);
+			strMcpy(pDev->dev_errmsg, quisk_sound_state.err_msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				printf("%s\n", quisk_sound_state.err_msg);
+		}
 	}
 	else if (cDev) {
 		error = Pa_OpenStream (&hndl, &cParams, NULL,
 				(double)cDev->sample_rate, cDev->read_frames, 0, NULL, NULL);
 		cDev->handle = (void *)hndl;
+		if (error != paNoError) {
+			strMcpy(quisk_sound_state.err_msg, Pa_GetErrorText(error), QUISK_SC_SIZE);
+			strMcpy(cDev->dev_errmsg, quisk_sound_state.err_msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				printf("%s\n", quisk_sound_state.err_msg);
+		}
 	}
 	else if (pDev) {
 		error = Pa_OpenStream (&hndl, NULL, &pParams,
 				(double)pDev->sample_rate, 0, 0, NULL, NULL);
 		pDev->handle = (void *)hndl;
+		if (error != paNoError) {
+			strMcpy(quisk_sound_state.err_msg, Pa_GetErrorText(error), QUISK_SC_SIZE);
+			strMcpy(pDev->dev_errmsg, quisk_sound_state.err_msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				printf("%s\n", quisk_sound_state.err_msg);
+		}
 	}
 	else {
 		error = paNoError;
 	}
 	if (pDev) {
-		pDev->play_buf_size = Pa_GetStreamWriteAvailable(pDev->handle);
-		if (pDev->latency_frames > pDev->play_buf_size) {
-#if DEBUG_IO
-			printf("Latency frames %d limited to buffer size %d\n",
-					pDev->latency_frames, pDev->play_buf_size);
-#endif
-			pDev->latency_frames = pDev->play_buf_size;
-		}
+		ptStreamInfo = Pa_GetStreamInfo(pDev->handle);
+		pDev->play_buf_size = (int)(ptStreamInfo->outputLatency * pDev->sample_rate + 0.5);
 	}
-#if DEBUG_IO
-	if (pDev) {
-		printf ("play_buf_size %d\n", pDev->play_buf_size);
-		printf ("latency_frames %d\n", pDev->latency_frames);
+	if (pDev && quisk_sound_state.verbose_sound) {
+		printf ("%s: portaudio play_buf_size %d\n", pDev->stream_description, pDev->play_buf_size);
+		printf ("%s: portaudio latency_frames %d\n", pDev->stream_description, pDev->latency_frames);
+		printf ("%s: portaudio portaudio_latency %lf\n", pDev->stream_description, pDev->portaudio_latency);
+		printf ("%s: portaudio outputLatency %lf\n", pDev->stream_description, ptStreamInfo->outputLatency);
 	}
-#endif
 	if (error == paNoError)
 		return 0;
-	strncpy(quisk_sound_state.err_msg, Pa_GetErrorText(error), QUISK_SC_SIZE);
 	return 1;
 }
 
@@ -372,7 +418,7 @@ void quisk_start_sound_portaudio(struct sound_dev ** pCapture, struct sound_dev 
 		}
 		pCapt++;
 	}
-	strncpy (quisk_sound_state.msg1, (*pCapture)->msg1, QUISK_SC_SIZE);	// Primary capture device
+	strMcpy (quisk_sound_state.msg1, (*pCapture)->msg1, QUISK_SC_SIZE);	// Primary capture device
 	// Open remaining portaudio devices
 	pPlay = pPlayback;
 	while (*pPlay) {
@@ -387,7 +433,7 @@ void quisk_start_sound_portaudio(struct sound_dev ** pCapture, struct sound_dev 
 		pPlay++;
 	}
      	if ( ! quisk_sound_state.msg1[0])	// Primary playback device
-		strncpy (quisk_sound_state.msg1, (*pPlayback)->msg1, QUISK_SC_SIZE);
+		strMcpy (quisk_sound_state.msg1, (*pPlayback)->msg1, QUISK_SC_SIZE);
 	pCapt = pCapture;
 	while (*pCapt) {
 		if ((*pCapt)->handle)
@@ -407,13 +453,6 @@ void quisk_close_sound_portaudio(void)
 	Pa_Terminate();
 }
 
-
-#if !defined(QUISK_HAVE_ALSA) && !defined(QUISK_HAVE_DIRECTX)
-//
-// quisk_sound_devices() is implemented in these two modules. If both are absent
-// (this usually means we are on Mac OS) we must provide a functional equivalent
-// here
-// 
 static int device_list(PyObject * py, int input)
 {
 	int retNum = 0;
@@ -446,7 +485,7 @@ static int device_list(PyObject * py, int input)
 	
 }
 					   
-PyObject * quisk_sound_devices(PyObject * self, PyObject * args)
+PyObject * quisk_portaudio_sound_devices(PyObject * self, PyObject * args)
 {	// Return a list of portaudio device names [pycapt, pyplay]
 	PyObject * pylist, * pycapt, * pyplay;
 	
@@ -462,17 +501,47 @@ PyObject * quisk_sound_devices(PyObject * self, PyObject * args)
 	device_list(pyplay, 0);
 	return pylist;
 }
-#endif
+#else		// No portaudio support
+#include <Python.h>
+#include <complex.h>
+#include "quisk.h"
 
-#if !defined(QUISK_HAVE_ALSA) && !defined(QUISK_HAVE_WASAPI)
-//
-// quisk_control_midi and the CW-MIDI status variable are defined in these two
-// modules. If they are not present, we must provide a dummy here. On MacOS,
-// we can even provide a functional replacement (ToDO)
-
-PyObject * quisk_control_midi(PyObject * self, PyObject * args, PyObject * keywds)
-{
-return Py_None;
+PyObject * quisk_portaudio_sound_devices(PyObject * self, PyObject * args)
+{	// Return a list of portaudio device names [pycapt, pyplay]
+	return quisk_dummy_sound_devices(self, args);
 }
-int quisk_midi_cwkey = 0;
+
+void quisk_start_sound_portaudio(struct sound_dev ** pCapture, struct sound_dev ** pPlayback)
+{
+	struct sound_dev * pDev;
+	const char * msg = "No driver support for this device";
+
+	while (*pCapture) {
+		pDev = *pCapture++;
+		if (pDev->driver == DEV_DRIVER_PORTAUDIO) {
+			strMcpy(pDev->dev_errmsg, msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				QuiskPrintf("%s\n", msg);
+		}
+	}
+	while (*pPlayback) {
+		pDev = *pPlayback++;
+		if (pDev->driver == DEV_DRIVER_PORTAUDIO) {
+			strMcpy(pDev->dev_errmsg, msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				QuiskPrintf("%s\n", msg);
+		}
+	}
+}
+
+int quisk_read_portaudio(struct sound_dev * dev, complex double * cSamples)
+{
+	return 0;
+}
+
+void quisk_play_portaudio(struct sound_dev * playdev, int nSamples, complex double * cSamples, int report_latency, double volume)
+{}
+
+void quisk_close_sound_portaudio(void)
+{}
 #endif

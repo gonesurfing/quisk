@@ -38,6 +38,7 @@ struct quisk_dHB45Filter {   // Real half band decimate by 2 filter with 45 coef
 
 void quisk_filt_cInit(struct quisk_cFilter *, double *, int);
 void quisk_filt_dInit(struct quisk_dFilter *, double *, int);
+void quisk_filt_differInit(struct quisk_dFilter *, int);
 void quisk_filt_tune(struct quisk_dFilter *, double, int);
 complex double quisk_dC_out(double, struct quisk_dFilter *);
 double quisk_dD_out(double, struct quisk_dFilter *);
@@ -82,3 +83,4 @@ extern double quiskDgtFilt48Coefs[520];
 extern double quiskFilt300D5Coefs[125];
 extern double quiskFilt300D6Coefs[248];
 extern double quiskFilt240D4Coefs[100];
+extern double quiskDiff48Coefs[38];

@@ -38,7 +38,7 @@ struct freedv_advanced {	// from freedv_api.h
 
 #ifdef MS_WINDOWS
 #include <windows.h>
-HMODULE WINAPI hLib;
+HMODULE hLib;
 #define GET_HANDLE1			hLib = LoadLibrary("libcodec2.dll")
 #define GET_HANDLE2			hLib = LoadLibrary(".\\freedvpkg\\libcodec2.dll")
 #define GET_HANDLE3			hLib = LoadLibrary(".\\freedvpkg\\libcodec2_32.dll")
@@ -530,8 +530,17 @@ static int OpenFreedv(void)	// Called from the GUI thread or sound thread
 			return 0;	// failure
 		}
 	}
+	if (requested_mode == FREEDV_MODE_700E) {
+		if (handle_index >= 3) {	// Quisk provided codec2
+			CloseFreedv();
+			requested_mode = -1;
+			if (DEBUG)
+				printf("freedv_open: Failure because mode 700E requires a system installation of codec2\n");
+			return 0;	// failure
+		}
+	}
 
-   	if (requested_mode == FREEDV_MODE_700D && freedv_open_advanced) {
+   	if ((requested_mode == FREEDV_MODE_700D || requested_mode == FREEDV_MODE_700E) && freedv_open_advanced) {
        	struct freedv_advanced adv;
        	adv.interleave_frames = interleave_frames;
        	hF = freedv_open_advanced(requested_mode, &adv);
@@ -631,7 +640,7 @@ PyObject * quisk_freedv_set_options(PyObject * self, PyObject * args, PyObject *
 	if (!PyArg_ParseTupleAndKeywords (args, keywds, "|isiiii", kwlist, &mode, &ptMsg, &DEBUG, &quisk_freedv_squelch, &interleave_frames, &bpf))
 		return NULL;
 	if (ptMsg)
-		strncpy(quisk_tx_msg, ptMsg, TX_MSG_SIZE);
+		strMcpy(quisk_tx_msg, ptMsg, TX_MSG_SIZE);
 	if (bpf != -1) {
 		quisk_set_tx_bpf = bpf;
 		if (freedv_set_tx_bpf && rx_channel[0].hFreedv)
@@ -639,6 +648,9 @@ PyObject * quisk_freedv_set_options(PyObject * self, PyObject * args, PyObject *
 	}
 	if (mode == -1) {	// mode was not entered
 		;
+	}
+	else if (mode == FREEDV_MODE_700E && freedv_version >= 14) {
+		requested_mode = mode;
 	}
 	else if (mode == FREEDV_MODE_2020) {
 		if (checkAvxSupport() && handle_index <= 2 && freedv_version >= 13)

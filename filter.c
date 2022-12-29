@@ -32,6 +32,29 @@ void quisk_filt_dInit(struct quisk_dFilter * filter, double * coefs, int taps)
 	filter->nBuf = 0;
 }
 
+void quisk_filt_differInit(struct quisk_dFilter * filter, int taps)
+{	// Prepare a new classic differentiating filter. taps must be odd.
+	int j, k;
+
+	filter->dCoefs = (double *)malloc(taps * sizeof(double));
+	for (k = - (taps - 1) / 2; k <= (taps - 1) / 2; k++) {
+		j = (taps - 1) / 2 + k;
+		if (k == 0)
+			filter->dCoefs[j] = 0;
+		else
+			filter->dCoefs[j] = pow(-1, k) / k;
+		printf("%4d taps %8.4lf\n", j, filter->dCoefs[j]);
+	}
+	filter->cpxCoefs = NULL;
+	filter->dSamples = (double *)malloc(taps * sizeof(double));
+	memset(filter->dSamples, 0, taps * sizeof(double));
+	filter->ptdSamp = filter->dSamples;
+	filter->nTaps = taps;
+	filter->decim_index = 0;
+	filter->dBuf = NULL;
+	filter->nBuf = 0;
+}
+
 void quisk_filt_tune(struct quisk_dFilter * filter, double freq, int ssb_upper)
 {	// Tune a filter into an analytic I/Q filter with complex coefficients.
 	// freq is the center frequency / sample rate.  Reverse coef if ssb_upper == 0.

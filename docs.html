@@ -12,6 +12,12 @@
 * {
     margin: 0px;
 }
+table, th, td {
+  border: 1px solid black;
+  border-collapse: collapse;
+  padding-left: 10px;
+  padding-right: 20px;
+}
 body {
     padding: 0px;
 }
@@ -37,7 +43,15 @@ div.contents {
     height: 100%;
     padding: 10px;
 }
+p      {font-size:1.2rem;}
+pre    {font-size:1.2rem;}
+ul     {font-size:1.2rem;}
+table  {font-size:1.2rem;}
+h1     {font-size:2.0rem;}
+h2     {font-size:1.8rem;}
+h3     {font-size:1.6rem;}
 </style>
+
 </head>
 
 <body>
@@ -58,14 +72,16 @@ div.contents {
 <li><a href="#ExtensionPackages">Extensions</a></li>
 <li><a href="#Digital">Digital Modes</a></li>
 <li><a href="#Hamlib">Rig Control and Logging</a></li>
+<li><a href="#wsjtx">WSJT-X</a></li>
 <li><a href="#VNA">VNA</a></li>
+<li><a href="#Remote">Remote Operation</a></li>
 </ul>
 </div>
 
 <div class="contents">
 <h1>
 <a id="Welcome"></a>
-Welcome to QUISK (June 2020)
+Welcome to QUISK (December 2022)
 </h1>
 
 <p>
@@ -90,6 +106,7 @@ complete transceiver. Quisk works with this hardware:
 </ul>
 <br>
 
+<p>
 Quisk is small and simple, and has been designed so that it is easy to
 change Quisk to suit your own hardware. Quisk rhymes with
 "brisk", and is QSK plus a few letters to make it
@@ -110,15 +127,21 @@ button on the lower right.
 <br>
 
 <br>
+</p>
 <h2>News</h2>
-The most recent wxPython version 4.1.0 is not compatible with Quisk on Windows. For Windows, please install the last version:
+<p>
+Python 2 was obsolete as of January 1, 2020. And the new code by Ben, AC2YD, needs Python 3. It is troublesome to write
+code that runs on both Python 2 and Python 3.  So it is time to stop supporting Python 2 in Quisk. Please upgrade to
+Python 3. If you have both versions, use Python 3 for Quisk.
+</p>
 <br>
-<br>
-pip install wxPython==4.0.7.post2
-<br>
-
+<p>
+The latest Python 3.10 now works with Quisk. You can upgrade from 3.8 if you want.
+<b>Quisk requires Python 3.8 or 3.9 or 3.10.</b>
+</p>
 <br>
 <h2 id="Credits">Credits </h2>
+<p>
 Quisk was originally written by James Ahlstrom, N2ADR.
 <br>
 
@@ -160,75 +183,49 @@ Thanks to Eric Thornton, KM4DSJ, for adding async support for PulseAudio.
 Many others contributed to Quisk, and are mentioned in comments in the source code.
 <br>
 <br>
+</p>
 
 <h2 id="Installation">Installation</h2>
 <p>
 Quisk is free open source software. It is hosted on the  PyPi repository
 <a href="https://pypi.org">https://pypi.org</a>.
 It can be installed using the standard Python setup tools. See specific directions below.
-Python is available as a series 2.7 release or a series 3 release, and there are 32-bit and 64-bit
-versions of each. You can continue to use the Python you have,
-but note that Python2 is no longer supported by the Python community. If you don't have Python, install
-the most recent 64-bit Python3. It is possible to have both Python 2.7 and Python3 installed,
-and then install Quisk on both. If you have both Python2 and Python3, you can start them with
-"py -2" or "py -3". See the Python documentation for the py launcher.
-Running both Python2 and Python3 is possible but can be confusing.
-</p>
-<br>
-<p>
-Note that the 32 and 64-bit versions of Quisk are for the 32 and 64-bit versions of Python.
-The machine archetecture (32 or 64 bit) does not matter. Quisk must agree with the Python version.
-But a machine with 32-bit archetecture will not run 64-bit software, so you will need 32-bit Python.
-If you have a 64-bit machine, you can use either 32 or 64-bit Python, but most software is changing to 64 bit.
-You don't have to worry about this, because when you run pip from Python, pip will choose the correct version
-of Quisk.
+There are 32-bit and 64-bit versions of Python. Be sure to use the 64-bit version unless your computer is only 32-bit.
+Quisk versions are available for old Pythons, but it is best to upgrade your Python to the latest supported
+64-bit version. If you already have an older 64-bit Python 3 installed it is OK to continue using it.
+Running multiple versions of Python is possible but can be confusing and is not necessary.
 </p>
 <br>
 <h3 id="g0.2.2">Windows Initial Installation</h3>
 <p>
-If you have Python, you can continue to use the version you have if it is recent.
-But now might be a good time to upgrade to the most recent 64-bit version of Python3 (uninstall your current Python first).
-If you don't have Python installed,
-visit <a href="http://www.python.org/">http://www.python.org</a>
-and download the Windows installer for the most recent Python3. Use 64-bit for a 64-bit computer.
-To get there from python.org, click on "Downloads", then "Windows", then
-"Latest Python 3 Release". Under "Files" click on "Windows installer".
-The x86 is the 32-bit version and x86-64 is the 64-bit version.
-When installing, write down your install directory so you know where Python is located.
-There is an option to "Add python.exe to Path". You should select
+You must first install the most recent supported version of 64-bit Python.
+If you already have 64-bit Python 3 installed, that is OK too.
+<b>Quisk requires Python 3.8 or 3.9 or 3.10.</b>
+There may be newer versions of Python, but until support is added, use the versions listed above.
+Python is available from <a href="http://www.python.org/">http://www.python.org</a>.
+There is an option to <b>Add Python to PATH</b>. You MUST select
 this option so that you can start python by just typing "python" instead of the whole path
-from your install directory.
-</p>
+to your install directory. My install directory is:
 <br>
-<p>
-Next open a Command Prompt. This is located under "Windows System" on Windows 10; or use the
-search bar. Enter "python --version" and then "pip --version" to make sure that these programs are installed,
-and what version you have. If "python" is not found, it might not be on your Path.
-Try <b>your_install_directory</b>\python --version.
-To run pip use <b>your_install_directory</b>\Scripts\pip --version. If you can find Python but not pip, you can run pip
-with "python -m pip".
-</p>
+C:\users\jim\AppData\Local\Programs\Python\Python39
 <br>
-<p>
-For Windows 10 and a recent Python, <b>your_install_directory</b> is (replace "jim" and "Python38" as appropriate):
-<br>
-<pre>
-<b>
-C:\users\jim\AppData\Local\Programs\Python\Python38
-</b>
-</pre>
-But note that "AppData" is invisible and will not appear in Windows Explorer unless you elect to show system files.
-You can use the above path anyway. Quisk is really designed for curious people who want to play with the code, but Windows
+And "AppData" is invisible. To avoid problems, check <b>Add Python to PATH</b>.
+If you forget, it is worth it to uninstall and reinstall Python.
+Quisk is really designed for curious people who want to play with the code, but Windows
 tries to shield users from program details.
 </p>
 <br>
 <p>
-Next upgrade some Python modules to the newest version, then install Quisk. Enter these commands. The upgrade of pip
-gave error messages on my machine, but it worked anyway.
+Next open Windows PowerShell (not PowerShell ISE). This is on the Start button menu on Windows 10; or use the
+search bar. Enter "python --version" and then "pip --version" to make sure that these programs are installed,
+and what version you have. If "python" is not found, it might not be on your Path.
+You will need to keep typing <b>your_install_directory</b>\python instead of "python".
+If you can find Python but not pip, you can run pip with "python -m pip".
 </p>
 <br>
-pip install --upgrade pip
-<br><br>
+<p>
+Next upgrade some Python modules to the newest version, then install Quisk. Enter these commands:
+<br>
 pip install --upgrade setuptools
 <br><br>
 pip install --upgrade wxPython
@@ -237,11 +234,11 @@ pip install --upgrade pyserial
 <br><br>
 pip install --upgrade quisk
 <br><br>
-<p>
-You should then be able to start Quisk with the command "quisk" or "<b>your_install_directory</b>\Scripts\quisk".
-You can also start Quisk with "python -m quisk" or "<b>your_install_directory</b>\python -m quisk".
+You should then be able to start Quisk with the command "quisk".
+You can also start Quisk with "python -m quisk".
 To create a Quisk shortcut on your desktop, right-click an empty space and select "New" and "Shortcut".
-Use "quisk" or "<b>your_install_directory</b>\Scripts\quisk.exe" as the command and "Quisk" as the name.
+Use "quisk.exe" as the command and "Quisk" as the name.
+The "quisk.exe" program is in <b>your_install_directory</b>\Scripts.
 Create another shortcut for quisk_vna if you plan to use it.
 If you are curious, Quisk and its Python source files are installed in "<b>your_install_directory</b>\Lib\site-packages\quisk".
 If you change to that directory you can run Quisk with "python quisk.py".
@@ -254,6 +251,7 @@ is (mostly) from the Config button. Ignore old directions and don't bother with 
 </p>
 <br>
 <h3>Windows Quisk Upgrade</h3>
+<p>
 To upgrade to a newer version of Quisk, use pip. Remember that if Python is not on your Path, you will
 need to type out the whole path.
 You should check for newer versions of the other modules twice a year.
@@ -268,90 +266,130 @@ You can also install an older version of Quisk. You may need to do that if the m
 pip install quisk==4.1.51
 <br>
 <br>
+</p>
 <h3>Windows Uninstall Quisk</h3>
+<p>
 pip uninstall quisk
 <br>
 <br>
+</p>
 <h3 id="g0.2.1">Linux Initial Installation</h3>
+<p>
 <br>
-NEW: The libsoundio-dev module is NO LONGER required!
+The libsoundio-dev module is NO LONGER required!
 <br>
 <br>
+Linux runs on a wide variety of computers with different processors and versions of Linux.
+Therefore Quisk is compiled for each one. To do this, Python and a number of other packages are required.
 Most likely both Python2 and Python3 are already installed on your computer. Either the 32-bit or 64-bit
 version will work. On my Ubuntu machine, "python2" starts Python2 and "python3" starts Python3.
-Just "python" starts python2, but this will change as Python2 is phased out.
+Just "python" starts Python2, but this will change as Python2 is phased out.
+Python2 is obsolete, so you should only install Quisk to Python3, and use "python3" to start it.
 Install these packages. Some of these can be installed from Python using "pip",
 but it is better to use your package manager because pip and the package manager do not coordinate.
 If newer versions of these packages become available, Linux will notify you.
+Use the most recent version of python3-wxgtk available.
+<br><br>
+</p>
+<table>
+  <tr>
+    <th>Package Description</th>
+    <th>Python3 Package</th>
+    <th>Python2 Package</th>
+  </tr>
+  <tr>
+    <td>Discrete fourier transform</td>
+    <td>sudo apt-get install libfftw3-dev</td>
+    <td>sudo apt-get install libfftw3-dev</td>
+  </tr>
+  <tr>
+    <td>Alsa sound library</td>
+    <td>sudo apt-get install libasound2-dev</td>
+    <td>sudo apt-get install libasound2-dev</td>
+  </tr>
+  <tr>
+    <td>Portaudio sound library</td>
+    <td>sudo apt-get install portaudio19-dev</td>
+    <td>sudo apt-get install portaudio19-dev</td>
+  </tr>
+  <tr>
+    <td>Pulseaudio sound library</td>
+    <td>sudo apt-get install libpulse-dev</td>
+    <td>sudo apt-get install libpulse-dev</td>
+  </tr>
+  <tr>
+    <td>Python development</td>
+    <td>sudo apt-get install python3-dev</td>
+    <td>sudo apt-get install python-dev</td>
+  </tr>
+  <tr>
+    <td>Python library development</td>
+    <td>sudo apt-get install libpython3-dev</td>
+  </tr>
+  <tr>
+    <td>wxPython GUI library</td>
+    <td>sudo apt-get install python3-wxgtk4.0</td>
+    <td>sudo apt-get install python-wxgtk3.0</td>
+  </tr>
+  <tr>
+    <td>Python USB</td>
+    <td>sudo apt-get install python3-usb</td>
+    <td>sudo apt-get install python-usb</td>
+  </tr>
+  <tr>
+    <td>Python installation tools</td>
+    <td>sudo apt-get install python3-setuptools</td>
+    <td>sudo apt-get install python-setuptools</td>
+  </tr>
+  <tr>
+    <td>Pip package installer</td>
+    <td>sudo apt-get install python3-pip</td>
+    <td>sudo apt-get install python-pip</td>
+  </tr>
+</table>
+<p>
+<br><br>
+If you want to use the SoapySDR module make sure that SoapySDR is installed from its Pothosware site before you build Quisk.
+Otherwise Quisk will not have the files it needs. You can install SoapySDR later, but then you
+will need to reinstall Quisk. This is also true of any other external packages that have their own C source.
 <br>
 <br>
-sudo apt-get install python-wxgtk3.0   ## Use this for Python2
+</p>
+<h3>Linux Pip Installation</h3>
+<p>
+You can use the Python program "pip" to install Quisk into the Python package directory. This is the easiest
+method, but it will not install the source files. If you want the source files see below.
+To install Quisk for Python2, use "python2" instead of "python3" below.
 <br>
-sudo apt-get install python3-wxgtk4.0  ## Use this for Python3
-<br>
-sudo apt-get install libfftw3-dev
-<br>
-sudo apt-get install libasound2-dev
-<br>
-sudo apt-get install portaudio19-dev
-<br>
-sudo apt-get install libpulse-dev
-<br>
-sudo apt-get install python-dev
-<br>
-sudo apt-get install libpython2.7-dev
-<br>
-sudo apt-get install python3-dev
-<br>
-sudo apt-get install libpython3-dev
-<br>
-sudo apt-get install python-usb
-<br>
-sudo apt-get install python3-usb
-<br>
-sudo apt-get install python-setuptools
-<br>
-sudo apt-get install python3-setuptools
-<br>
-sudo apt-get install python-pip
-<br>
-sudo apt-get install python3-pip
-<br>
-<br>
-Then install either or both versions of quisk. They will not interfere with each other.
-<br>
-<br>
-sudo -H python2 -m pip install --upgrade quisk
 <br>
 sudo -H python3 -m pip install --upgrade quisk
 <br>
 <br>
 This will install the Python files and all other files except for the C source. This is the easiest method
 if you do not want to work in C.
-If you have both Python2 and Python3 quisk, you can run either with these commands:
+To run Quisk, use this command from a terminal:
 <br>
-<br>
-python2 -m quisk
 <br>
 python3 -m quisk
 <br>
 <br>
-If you have only one quisk you can run it with the command "quisk".
 You can create a panel launcher on your desktop with the command to run Quisk.
 <br>
 <br>
 If the installation of Quisk fails, you can force re-installation:
 <br>
 <br>
-sudo -H python -m pip uninstall quisk
-<br>
-sudo -H python -m pip install  --no-cache-dir  --force-reinstall  quisk
-<br>
+</p>
+<pre>
+sudo -H python3 -m pip uninstall quisk
+sudo -H python3 -m pip install  --no-cache-dir  --force-reinstall  quisk
+</pre>
+<p>
 <br>
 You can also install an older version of Quisk. You may need to do that if the most recent version fails for some reason. Use:
 <br>
 <br>
-sudo -H python -m pip install quisk==4.1.51
+sudo -H python3 -m pip install quisk==4.1.51
 <br>
 <br>
 To get started you must tell Quisk what kind of radio hardware you have. Press the Config button and select Radios.
@@ -362,33 +400,36 @@ is (mostly) from the Config button. Ignore old directions and don't bother with 
 To edit the Quisk Python files you need to know where they are. To find out, import quisk and print it:
 <br>
 <br>
+</p>
 <pre>
-jim@IntelNUC:~$ python
-Python 2.7.12 (default, Nov 12 2018, 14:36:49) 
-[GCC 5.4.0 20160609] on linux2
+jim@IntelNUC:~$ python3
+Python 3.6.9 (default, Oct  8 2020, 12:12:24) 
+[GCC 8.4.0] on linux
 Type "help", "copyright", "credits" or "license" for more information.
->>> import quisk
->>> quisk
- module 'quisk' from '/usr/local/lib/python2.7/dist-packages/quisk/__init__.pyc'
->>>
+--- import quisk
+--- quisk
+module 'quisk' from '/usr/local/lib/python3.6/dist-packages/quisk/__init__.py'
+--- 
+
 </pre>
 <br>
-<h3>Linux Quisk Upgrade</h3>
+<h3>Linux Pip Upgrade</h3>
+<p>
 To upgrade to a newer version of Quisk, use pip:
 <br>
-<br>
-sudo python2 -m pip install --upgrade quisk
 <br>
 sudo python3 -m pip install --upgrade quisk
 <br>
 <br>
+</p>
 <h3>Linux Uninstall Quisk</h3>
-sudo python2 -m pip uninstall quisk
-<br>
+<p>
 sudo python3 -m pip uninstall quisk
+</p>
 <br>
 <br>
-<h3>Linux Quisk Source Files</h3>
+<h3>Linux Source Installation</h3>
+<p>
 The previous method using pip is simple, but will not install the C source files. If you want those proceed as follows.
 Go to <a href="https://pypi.org/project/quisk/">https://pypi.org/project/quisk</a> and under "Navigation"
 select "Download files". Download the quisk-x-x-xx.tar.gz file. This is the source file. The ".whl" files are for Windows.
@@ -404,15 +445,11 @@ cd quisk-x.x.xx
 <br><br>
 Now compile Quisk with the "make" command:
 <br><br>
-make quisk2   # for python2
-<br>
-make quisk3   # for python3
+make quisk3
 <br><br>
 If "make" fails, you probably have missing packages or missing "-dev" packages. Try to figure out what is missing from the error messages.
 Now you can run quisk with the command:
 <br><br>
-python2 quisk.py
-<br>
 python3 quisk.py
 <br><br>
 At this point you have a choice of where to install Quisk. You could just rename the quisk-x.x.xx directory
@@ -424,12 +461,15 @@ python2 setup.py build
 <br>
 sudo python2 setup.py install
 <br><br>
+</p>
 <h3 id="g0.2.4">Quisk Files</h3>
+<p>
 <br>
 These are the Quisk files in the distribution:
 <br>
 
 <br>
+</p>
 <ul>
 
 <li>quisk.py is the main program and is written in the Python
@@ -550,107 +590,41 @@ devices. It is not used by the Quisk program. </li>
 </ul>
 <br>
 <h2 id="Configuration">Configuration</h2>
-The Quisk "Config" button brings up a number of status and configuration screens. When starting with Quisk, you need to create a named "radio"
-and then set the configuration for that radio. You can have multiple radios to support several hardwares, or different settings
-for the same hardware. Use the "Help with Radios" button for documentation. A special radio named "ConfigFileRadio" is always available.
-It doesn't use the settings screens and takes all its settings from the configuration file. 
+<p>
+The Quisk "Config" button brings up a number of status and configuration screens.
+Quisk supports multiple types of radio hardware and each type has different parameters.
+Each block of parameters is called a "radio". It is a named block of settings Quisk uses
+to control a specific kind of hardware.
+So a single Quisk can have parameters for a SoftRock and an HL2.
+You specfy the radio you want when starting Quisk.
+<br>
+<br>
 
-When Quisk starts, it reads an initial configuration from the Quisk file quisk_conf_defaults.py.
-Then it reads your configuration file if you have one. Then it reads settings from the configuration screens,
-which are stored in the file quisk_settings.json.
+When you first install Quisk, you will not have any settings for your radio.
+Press the Config button and go to the Radios screen.
+Then create a radio by specifying the general hardware type and give it a name of your choosing.
+For a Hermes-Lite, specify "Hermes" as the hardware type and call it "HL2" (or some other name).
+Press "Add" and a new tab for your radio will appear. Look through the various settings on the HL2 tab.
+The parameters for the radios are stored in the file quisk_settings.json.
+<br>
+<br>
+
+A special radio called "ConfigFileRadio" is always available.
+It takes its parameters from a configuration file.
 You can set almost everything with the screens, but you can have a configuration file if you want.
-For Linux, the default configuration file name is ".quisk_conf.py" in
-your home
+Most users will not need a configuration file.
+For Linux, the default configuration file name is ".quisk_conf.py" in your home
 directory; that is, "~/.quisk_conf.py". For Windows, the default
 configuration file name is quisk_conf.py in your My Documents folder.
-<br>
-<ul>
 
-<li>Linux config
-file:
-~/.quisk_conf.py</li>
 
-<li>Windows config file: My Documents/quisk_conf.py
-<br>
-  </li>
-</ul>
-To help you get started,
-there
-are several configuration files included, such as
-quisk_conf_model.py
-for
-sound card, quisk_conf_sdriq.py for SDR-IQ, and quisk_conf_fixed.py for
-fixed
-VFO such as SoftRock. Do not change any of the quisk_conf_*.py
-files. Instead copy one of
-these
-files (but NOT quisk_conf_defaults.py) to your own config file.
-Newer versions of Quisk will not overwrite your personal config file.
-<br>
+
 
 <br>
-The file quisk_conf_defaults.py contains all Quisk's parameters, and you can read it to see what can be changed.
 <br>
-
-<br>
-If you are controlling custom hardware, you will need to specify a
-hardware
-file in quisk_conf.py. The default is quisk_hardware_model.py. Look at
-the
-other quisk_hardware_*.py files. For example, quisk_hardware_fixed.py
-is for
-crystal controlled SoftRock. To use that hardware file, change your
-quisk_conf.py to include:
-<br>
-
-<br>
-<div style="margin-left: 40px;">import quisk_hardware_fixed as
-quisk_hardware
-<br>
-</div>
-<br>
-There are comments in quisk_conf_model.py showing this change.
-If none of the hardware files do exactly what you want, copy one of
-them to
-your own quisk_hardware.py, edit that file, and include this line in
-quisk_conf.py:
-<br>
-
-<br>
-<div style="margin-left: 40px;">import quisk_hardware
-<br>
-</div>
-<br>
-Newer versions of Quisk will not overwrite your
-quisk_hardware.py. Your hardware file enables you to customize
-Quisk without changing the Quisk program files.
-<br>
-
-<br>
-Alternatively, you can define a class named "Hardware" in your config
-file,
-and that class will be used instead of a hardware file. This is
-recommended
-only for simple hardware needs. The class should start like this:
-<br>
-<br>
-
-<pre>from quisk_hardware_model import Hardware as BaseHardware
-class Hardware(BaseHardware):
-    def __init__(self, app, conf):
-        BaseHardware.__init__(self, app, conf)
-        # Start your hardware control here.
-        # For ideas, see one of the other hardware modules.
-</pre>
-
-<br>
-Both the config file and your hardware file are written in the Python
-language. Python is an easy to learn but powerful computer
-language. Quisk can be adapted to different hardware because of
-the power of Python.
-<br>
-<br>
+</p>
 <h2 id="SoundCards">Sound Cards </h2>
+<p>
 If you use a sound card for input, the quality of your sound card is
 critical;
 but you can start with the sound card you have. Check the Graph screen
@@ -687,6 +661,7 @@ important, so try the one you have. Be aware that most sound
 cards require the capture and playback rate to be the same when used
 for both. Here are some sample configurations:
 <br>
+</p>
 <ul>
 
 <li>SoftRock Rx/Tx: Receive to card 1, Transmit to card 1 at the same
@@ -705,14 +680,17 @@ for the play device.
 <br>
   </li>
 </ul>
+<p>
 If you buy a new sound card, make sure you know the
 capture (recording) sample rates and the noise level. Sound cards
 are usually specified over
 the audio range up to 24 kHz or so. But we need low noise and
 distortion
 over the whole range.
+</p>
 <br>
 <h3 id="g0.4.1">Linux Names</h3>
+<p>
 Quisk can use PulseAudio, PortAudio or ALSA to access your sound card.
 Names can be a fragment of text from the device description. It is
 better to use this text search rather than an index number, because the
@@ -728,12 +706,16 @@ work,
 use the "plughw" name. The ALSA name can also be a string
 name. Here are some ALSA names:
 <br>
+</p>
+<br>
 <pre>"hw:0"		# First sound card
 "hw:1"		# Second sound card, etc.
 "plughw"	# plug device
 "default"	# alsa default device
 "alsa:NVidia"	# Search for the name in the alsa device description
 </pre>
+<br>
+<p>
 Alsa names starting with "alsa:" are an extension to the normal alsa
 names. They search for the text after the colon in the alsa
 device
@@ -749,13 +731,16 @@ The PortAudio interface is now optional. Many users are changing to PulseAudio.
 You can run "python portaudio.py" in a terminal window to
 see a list of available PortAudio names. Here are some PortAudio names:
 <br>
+</p>
 <pre>"portaudio:(hw:0,0)"    First sound card.
 "portaudio:(hw:1,0)"    Second sound card, etc.
 "portaudio:NVidia"      Search for the name in the portaudio device description.
 "portaudio#1"           Directly specified index.
 "portaudiodefault"      May give poor performance on capture.
 </pre>
+<br>
 <h3 id="g0.4.2">Linux Sound Servers </h3>
+<p>
 Newer Linux systems are now shipping with PulseAudio enabled.
 PulseAudio is a sound server, a program that takes control of your
 sound cards, and controls usage by applications. The idea is that
@@ -778,6 +763,8 @@ and for ALSA devices, the ALSA name.
 Instead of the long PulseAudio name, you can enter a substring of any of these three strings.
 An example is:
 
+</p>
+<br>
 <pre>
 # As seen on the Config/Sound screen:
      CM106 Like Sound Device Analog Stereo
@@ -793,19 +780,22 @@ An example is:
 # Another abbreviation:
    "pulse:CM106"
 </pre>
+<br>
 
+<p>
 The PulseAudio code should not cause problems, but I am not sure what happens if PulseAudio is not
 installed, or if you replace it with JACK.  This config file option will turn off all but directly
 entered "pulse:" names:
+</p>
 <pre>show_pulse_audio_devices = False
 </pre>
 
 
 <br>
 
-<br>
 <h3 id="g0.4.3">Linux Problems </h3>
 
+<p>
 If Quisk appears to run but you get no sound input or output, you
 may be having trouble
 with your settings. Start Quisk and look at the graph. You should get a
@@ -862,6 +852,7 @@ except for the microphone input on my second sound card.
 If you really get stuck, try one of these commands (see the "man"
 page):
 <br>
+</p>
 <ul>
 
 <li>alsamixer  An ALSA mixer program with a curses interface. </li>
@@ -882,6 +873,8 @@ page):
 
 <li>speaker-test  Play sound to test your speakers. </li>
 </ul>
+<p>
+<br>
 And try to play an audio CD or run some other Linux audio program just
 to see that you
 have a working sound system.
@@ -891,7 +884,9 @@ changing the sound card names.
 <br>
 
 <br>
+</p>
 <h3 id="g0.4.4">Windows Names</h3>
+<p>
 To see what sound cards you have, use the Control Panel item Sound
 Devices. There is a separate list for capture (recording) and
 playback devices, and a specified default device for each. The
@@ -900,7 +895,9 @@ card name, use either "Primary" or a substring of the device
 name. The search is case sensitive.
 <br>
 <br>
+</p>
 <h2 id="SoftRock">SoftRock</h2>
+<p>
 SoftRock radios use an analog mixer to change the RF signal to stereo audio, and then use a sound card to digitize it.
 A high quality sound card is advisable. The analog mixer is not perfect, and it will be necessary to adjust the I and Q
 signals to equal amplitude and 90 degrees phase difference. Use the Config/Config screen buttons to
@@ -926,6 +923,7 @@ and look at the image. If you don't have a spectrum analyzer use a second receiv
 the amplitude and phase sliders on the adjustment screen, and then press "Save".
 <br>
 <br>
+</p>
 <h2 id="SDRIQ">SDR-IQ as Input </h2>
 <p>
 Quisk can use an SDR-IQ from RfSpace instead of a sound card as input.
@@ -964,11 +962,10 @@ Next compile the perseuspkg using the command:
 <pre>
 make perseus3
 </pre>
-</br>
+<br>
 <p>
 The several sample rates can be selected opening Config panel: in
 the Config tab there is the Samples rates dropdown.
-</p>
 The input analog filter can be switched in using the button Wideband.<br>
 The input attenuator is operate via the button RF, that allows to select
 the four attenuator steps.<br>
@@ -977,7 +974,7 @@ left bottom corner as ADC Dither and ADC Preamp.<br>
 </p>
 <br>
 <h2 id="Timing">Timing </h2>
-<br>
+<p>
 There are several configuration parameters devoted to tuning; read the
 file quisk_conf_defaults.py for documentation. For most users, Quisk
 should run fine with the default settings. But if you use Quisk as part
@@ -988,7 +985,9 @@ likelihood of clicks and pops due to sound buffer underruns.
 <br>
 
 <br>
+</p>
 <h2 id="USBControl">USB Control </h2>
+<p>
 Many radio devices are now controlled through a USB interface. In
 many cases, the interface is actually a serial port, and an external or
 internal USB to serial converter is used. In other cases, the USB
@@ -999,7 +998,9 @@ system built-in driver.
 <br>
 
 <br>
+</p>
 <h3 id="g0.7.1">Linux</h3>
+<p>
 Default USB permissions do not allow a non-root user to write to the
 bus. You may find that Quisk will complain about lack of
 permission to access the USB. You could test this by running
@@ -1026,72 +1027,110 @@ don't need "MODE"; modify as appropriate. To load the new rule, you can either r
 <br>
 
 <br>
+</p>
 <h2 id="CustomHardware">Custom Hardware</h2>
-<p>Quisk receives RF using your sound card or your SDR-IQ out of the
-box. But if you have
-custom hardware such as a VFO or
-a transmitter, you need to describe your hardware to Quisk.</p>
-First, Quisk has a transmit (Tx) frequency and a receive (Rx)
-frequency. The transmit frequency is the one shown in the
-frequency display, and shown by the tuning line on the graph and the
-waterfall. The Rx frequency is always equal to the Tx frequency
-except when the RIT (receiver incremental tuning) button is down or the
-Split feature is in use.
-The primary frequency in Quisk is the Tx frequency, even when you are
-receiving.
-<br>
-
-<br>
-Quisk has a "VFO" frequency. This is the RF frequency
-corresponding to zero Hertz audio frequency, and is the frequency shown
-at the center of the
-graph display. For a SoftRock or a direct conversion receiver
-(Tayloe detector, SDR1000-type hardware, etc.) this really is the VFO
-frequency. But consider an AOR AR8600 receiver with a 10.7 MHz IF
-output
-to a pan adapter. For that case, the VFO is always 10.7 MHz since
-that is the center point of the display, and signals at exactly 10.7
-MHz are at zero Hertz audio. But to display the correct frequency
-within Quisk, the VFO would be the tuning frequency of the AR8600.
-<br>
-
-<br>
-When Quisk starts, it uses the hardware description in
-quisk_hardware_model.py, but this file doesn't do much. It is
-mostly useful as a model or starting point. To use a different
-hardware
-file, first create a custom file such as my_hardware.py. Look at
-the various quisk_hardware_*.py for ideas. Then import your file
-in your config file:
-<br>
-
-<br>
-<pre> import my_hardware as quisk_hardware.</pre>
-<br>
-Suppose you have a crystal controlled SoftRock. A good model
-hardware file is quisk_hardware_fixed.py. Copy
-quisk_hardware_fixed.py to my_hardware.py, make any changes to
-my_hardware.py, and import it in your config file.
-<br>
-
-<br>
+<p>
+Quisk comes with hardware files for many types of radio. See the various quisk_hardware_*.py files.
+But if you have a radio that Quisk does not support, or if you want to customize an included hardware file, you
+can write your own hardware file and enter the name on the Config/radio/Hardware screen.
+A model hardware file is included as quisk_hardware_model.py.
+It is useful as a starting point and as documentation. Hardware files use Python class inheritance.
+That is, all hardware files inherit methods from a parent file and then add their custom methods.
+Hardware files can control other hardware too.
 At my shack, I control an AT-200PC antenna tuner, my SDR-IQ, my filter
-boxes and my SSB transceiver (using Ethernet) all with Quisk. Take a
-look at my n2adr subdirectory.
+boxes and my SSB transceiver (using Ethernet) all with Quisk.
+Take a look at my n2adr subdirectory.
+</p>
 <br>
-
-<br>
+<p>
 The quisk_hardware_model.py file shows the basics of hardware control.
 There is an open() and close() function called once on startup and
 shutdown. The ChangeMode() and ChangeBand() functions are called when
 the user changes the mode or band with the corresponding buttons.
 The HeartBeat() function is called at about 10 Hz by Quisk. You
 can put code there to poll a serial port or to perform other
-housekeeping functions (try to be efficient). The two remaining
-functions deserve more documentation.
+housekeeping functions.
+</p>
+<br>
+<p>
+Here is the start of the SDR-IQ hardware file:
+</p>
+<br>
+<pre>
+from quisk_hardware_model import Hardware as BaseHardware
+
+class Hardware(BaseHardware):
+  def __init__(self, app, conf):
+    BaseHardware.__init__(self, app, conf)
+    # etc.
+  def ChangeBand(self, band):
+    # etc.
+</pre>
+<br>
+<p>
+The file imports the Hardware from quisk_hardware_model and uses it as the basis of the SDR-IQ Hardware class.
+It calls the base init function and then adds its own methods for ChangeBand() and other methods. If
+it does not define a method, the method from quisk_hardware_model is used. Please refer to Python documentation if
+you are not familiar with inheritance.
+</p>
+<br>
+<p>
+If you want to write a hardware file from scratch, your file would start the same way. But if you have a radio like
+the SDR-IQ but want to customize it, your hardware file would look like this:
+</p>
+<br>
+<pre>
+from quisk_hardware_sdriq import Hardware as BaseHardware
+
+class Hardware(BaseHardware):
+  def __init__(self, app, conf):
+    BaseHardware.__init__(self, app, conf)
+    # etc.
+  def ChangeBand(self, band):
+    # etc.
+</pre>
+<br>
+<p>
+This file uses all the methods from the SDR-IQ file except ones that are defined here.
+The HL2 hardware file is in the hermes subdirectory, so to create a custom file you would use:
+</p>
+<br>
+<pre>
+from hermes.quisk_hardware import Hardware as BaseHardware
+</pre>
 <br>
 <br>
+<p>
+Alternatively, you can define a class named "Hardware" in your config
+file,
+and that class will be used instead of a hardware file. This is
+recommended
+only for simple hardware needs. The class should start like this:
+<br>
+<br>
+</p>
+
+<pre>from quisk_hardware_model import Hardware as BaseHardware
+class Hardware(BaseHardware):
+    def __init__(self, app, conf):
+        BaseHardware.__init__(self, app, conf)
+        # Start your hardware control here.
+        # For ideas, see one of the other hardware modules.
+</pre>
+
+<br>
+
+<br>
+<p>
+Both the config file and your hardware file are written in the Python
+language. Python is an easy to learn but powerful computer
+language. Quisk can be adapted to different hardware because of
+the power of Python.
+<br>
+<br>
+</p>
 <h3 id="g0.8.1">ChangeFrequency(self, tune, vfo, source='', band='', event=None)</h3>
+<p>
 Quisk calls the ChangeFrequency() function when the user changes the Tx
 frequency with a mouse click on the graph or waterfall, with the entry
 box, with the band Up/Down buttons, etc. The "source" is a string
@@ -1099,7 +1138,8 @@ giving the reason for the change:
 <br>
 
 <br>
-<table style="text-align: left; width: 896px; height: 190px;" cellspacing="2" cellpadding="2" border="1">
+</p>
+<table style="text-align: left; width: 896px; height: 190px;" cellspacing="2" cellpadding="2" border="1" border-collapse="collapse">
 
 <tbody>
 
@@ -1162,6 +1202,7 @@ left button</td>
   </tbody>
 </table>
 <br>
+<p>
 Most of the time you will not care about the "source". You just
 need to react to the user's action, perhaps by changing the hardware
 VFO frequency. It is not necessary to actually make the change
@@ -1195,7 +1236,9 @@ tune).
 <br>
 
 <br>
+</p>
 <h3 id="g0.8.2">ReturnFrequency(self)</h3>
+<p>
 When Quisk starts, it calls ReturnFrequency() to get the initial tune
 and VFO. To display an initial frequency, return (tune, vfo) on
 the first call.
@@ -1221,15 +1264,18 @@ unaware of the change.
 <br>
 
 <br>
+</p>
 <h3 id="g0.8.3">Adding Custom Hardware to the Config/Radios Screen</h3>
-Once you write your own hardware file for your custom hardware, you still need to add it to the
-list of available radio types, and add its configuration options to its Config/radios/Hardware screen.
-First create a subdirectory of the Quisk directory with a name ending in "pkg"; for example,
+<p>
+If you have unique hardware and want to add it to the 
+list of available radio types and add its configuration options to its Config/radios/Hardware screen,
+create a subdirectory of the Quisk directory with a name ending in "pkg"; for example,
 "myradiopkg". Then put your hardware file in this subdirectory with the name "quisk_hardware.py".
 You will need at least one configuration option to specify the hardware file name.
 Add this code (all comments) near the top of quisk_hardware.py:
+</p>
+<br>
 <pre>
-
 # Define the name of the hardware and the items on the hardware screen (see quisk_conf_defaults.py):
 ################ Receivers MyRadio, The special radio that I own
 ## hardware_file_name		Hardware file path, rfile
@@ -1237,6 +1283,7 @@ Add this code (all comments) near the top of quisk_hardware.py:
 #hardware_file_name = 'myradiopkg/quisk_hardware.py'
 
 </pre>
+<p>
 Of course, change the names of the radio and subdirectory as appropriate. Your radio of general type "MyRadio"
 will now appear in the list of radios on the Config/Radios screen, and its configuration items will appear
 on the Config/radio/Hardware screen. You can add additional items. See quisk_conf_defaults.py and the *pkg
@@ -1244,7 +1291,9 @@ subdirectories for examples.
 
 <br>
 <br>
+</p>
 <h2 id="ExtensionPackages">Extension Packages </h2>
+<p>
 Quisk comes with two extension packages. The freedvpkg package
 supports FreeDV digital voice. The n2adr package
 supports the hardware in my shack. There are other extension
@@ -1269,8 +1318,10 @@ Maitland Bottoms, AA4HS, and he also provided patches.
 <br>
 
 <br>
+</p>
 <h3 id="g0.9.1">Shared Libraries </h3>
 
+<p>
 The main Python extension module for Quisk is _quisk.so or _quisk.pyd.
 It is a shared
 library. To import it, it must be on the Python path. There are other
@@ -1299,8 +1350,10 @@ linker. Only minimal changes to your sub-module are
 required. The SDR-IQ module sdriq.so uses this method, and you
 can use it as a model. See the file import_quisk_api.c for
 documentation.
+</p>
 <br>
 <h3 id="g0.9.2">New Packages </h3>
+<p>
 If you have more complex needs or want to distribute your code more
 widely, you need to create a new Quisk package. That is easily
 done by modeling your code after the existing packages. To create
@@ -1309,6 +1362,7 @@ perhaps "mypak". Then create these files in mypak:
 <br>
 
 <br>
+</p>
 <ul>
 
 <li>__init__.py This file just consists of
@@ -1350,6 +1404,7 @@ and use other packages as examples.
   </li>
 </ul>
 <br>
+<p>
 To these files, you add all your Python files, C-language files and any
 other files you need. If you have a hardware or widget file, they
 should be named quisk_hardware.py and quisk_widgets.py. Longer
@@ -1396,7 +1451,9 @@ documentation.
 <br>
 
 <br>
+</p>
 <h3 id="g0.9.3">Installing Packages </h3>
+<p>
 Your package mypak will run on your machine as is. But when
 another user gets mypak-1.0.tar.gz they need to install it.
 Basically, they just put it in the Quisk root with the same name as on
@@ -1429,56 +1486,56 @@ is no longer needed
 <br>
 
 <br>
+</p>
 <h2 id="Digital">Digital Modes </h2>
+<p>
 Quisk has a number of modes "DGT-" to receive and transmit digital
 signals. The modes "DGT-U" and "DGT-L" decode the signal as upper
-or lower sideband, and send the monophonic audio to the digital sound
-device. The mode "DGT-IQ" does not decode the audio; the I/Q
-samples are sent directly to the (stereo) digital sound device.
-The bandwidth of the digital signals is set with the filter buttons as
+or lower sideband, and send the stereo audio to the digital sound
+device. The left and right channel are the same.
+The bandwidth is set with the filter buttons as
 usual, and the filter center is 1500 Hertz.
+The mode "DGT-IQ" does not decode the audio; the I/Q
+samples are sent directly to the stereo digital sound device.
 <br>
 
 <br>
-Digital modes require an external program such as Fldigi or wsjtx to decode the
-received
+Digital modes require an external digital program such as Fldigi or WSJT-X to decode the received
 audio and to generate transmit audio. There are two aspects, rig
 control and audio transfer. Rig control is needed to synchronize
-the transmit frequency between Quisk and Fldigi (or other program) and
+the transmit frequency between Quisk and WSJT-X and
 to operate the PTT (push to talk). You can control Quisk using
-either XML-RPC or Hamlib.
+XML-RPC, Hamlib or a serial port.
 See <a href="#Hamlib">Rig Control and Logging</a> below.
 <br>
 <br>
-Quisk has an additional audio input and output for digital
-programs. They are named digital_input_name and
-digital_output_name in the config file.
-They are Digital Input and Digital Output on your radio's Sound configuration screen.
-You need to set these names to a sound
-device, and then set the Fldigi (or other program) sound card to the
-same device. The sound device is not a real sound card; it is
+Quisk has additional audio inputs and outputs for digital programs.
+On the radio Sound screen "Digital Tx0 Input" is the Quisk input for transmitted audio.
+The "Digital Rx0 Output" is the Quisk output of the received digital signals.
+You need to set these names to a sound device.
+
+The sound device is not a real sound card; it is
 some sort of loopback device, and is only needed because there is no
-standard way of sending sound samples between two programs (yet).
+standard way of sending digital samples between two programs (yet).
 The method to use for Quisk is the same as for other programs, and is
-on the web. It works for any digital program, not just Fldigi.
+on the web. It works for any digital program.
 <br>
 <br>
 If you use Windows, you need to purchase a Virtual Audio Cable
-(VAC). Connect Quisk to one side, and your digital program to the
-other. I haven't tried this, so I don't know the device names to
-use, but it is straight forward.
+(VAC). Connect Quisk to one side, and your digital program to the other.
+The name of the sound device depends on which VAC you use.
 <br>
 <br>
 If you use Linux, you can use the ALSA loopback device, or use
 PortAudio, PulseAudio or Jack to route your audio.  Using PulseAudio is the
 easiest method because Quisk can set up the loopback devices when it starts.
-Set Digital Input to
-pulse:QuiskDigitalInput.monitor, and set Digital Output to pulse:QuiskDigitalOutput.
-These names should be on the drop down list. If they are missing, make sure that
-you didn't set "show_pulse_audio_devices" to False in your config file.  Then restart Quisk.
+Set "Digital Tx0 Input" to "pulse: Use name QuiskDigitalInput".
+Set "Digital Rx0 Output" to "pulse: Use name QuiskDigitalOutput.monitor".
+These names are on the drop down list for the sound device.
 In your digital program, connect the digital
 input to QuiskDigitalOutput.monitor and the digital output to QuiskDigitalInput.
-These names will be on the sound menu in wsjtx, and you should be receiving and transmitting digital data.
+These names will be on the sound menu of the digital program, and you should be receiving and transmitting digital data.
+Remember to select one of the DGT-* modes.
 <br>
 <br>
 Fldigi only has a PulseAudio check box, and there is no way to set the proper device.
@@ -1499,32 +1556,24 @@ when the system starts, but the way to do that depends on your version of
 Linux. I added snd-aloop to /etc/modules.  You could put the modprobe command in /etc/rc.local instead.
 Restart Linux. Now you can enter "cat /proc/asound/cards" to
 print out your sound cards, and you should see a "Loopback" card
-listed. The cards are also shown on the Quisk config
+listed. The cards are also shown on the Quisk Sound
 screen. The Loopback card has one side that connects to Quisk and
 another side that connects to your digital program. For the Quisk
 side connect both Digital Input and Digital Output to Loopback,0.
 Note that the Loopback card is full duplex, and handles both
 input and output. There are actually eight loopbacks created at once,
 but we are only using subdevice 0. For the digital program side, set the input and
-output to "Loopback,1". For Fldigi this is in the Audio / Devices
-/ PortAudio menu. Your audio is now connected and you
+output to "Loopback,1".
+Your audio is now connected and you
 should be able to receive digital signals. Be sure to test your
 transmit signal off the air. You may need to reduce power to
 improve linearity.
 <br>
 
 <br>
-The sample rate for Quisk Digital Input (transmit audio) is fixed at
-48000 sps. The sample rate for Quisk Digital Output (received
-audio) is the same as the rate sent to your speakers. The
-Loopback device adopts the rate of the first program to use it.
-So starting Quisk first and your digital program next should
-work. Or you may need to set the appropriate rates. It is
-probably best to set all sample rates to 48000 sps because the digital
-signals are so narrow, and this make them easier to see.
-<br>
-<br>
+</p>
 <h2 id="Hamlib">Rig Control and Logging</h2>
+<p>
 Digital mode and logging programs need to control Quisk to read and set the frequency and mode and to operate PTT.
 Quisk has three options for external control and they can all be used together to connect to multiple programs.
 See the Config/radio/Remote screen.
@@ -1532,6 +1581,7 @@ See <a href="http://james.ahlstrom.name/hamlib.html">http://james.ahlstrom.name/
 <br><br>
 To connect an external program to Quisk using Hamlib, configure your program to use "Hamlib NET rigctl" (rig 2).
 Then go to the Quisk "Remote" config screen for your radio and set
+"IP address for Hamlib Rig 2" to "localhost", and set
 "IP port for Hamlib" to 4532. This assumes you are not using the rigctld daemon program.  If you are,
 set the Quisk port to 4575 and tell rigctld to control quisk on port 4575.
 Now changing the frequency on one program will change the other.
@@ -1550,15 +1600,57 @@ needed for samples. An Internet search will turn up HDD Software, Eltima Softwar
 and enter one name on the Quisk Remote screen and the other name in the external program.
 <br>
 <br>
+</p>
+<h2 id="wsjtx">WSJT-X</h2>
+<p>
+Quisk has special support for the digital program WSJT-X.
+There is a button to start WSJT-X on the Config/Config screen. Look for "Start WSJT-X" and select "Main Rx0 now".
+This starts WSJT-X with radio "quisk" and you will see "WSJT-X - quisk" in the title bar.
+Then under WSJT-X File/Settings set up the Radio and Audio as described above.
+For Linux, use the pulseaudio devices:
+<br><br>
+</p>
+<table>
+  <tr>
+    <th>Quisk Name</th>
+    <th>Quisk Value</th>
+    <th>WSJT-X Name</th>
+    <th>WSJT-X Value</th>
+  </tr>
+  <tr>
+    <td>IP address for Hamlib Rig 2</td>
+    <td>localhost</td>
+    <td>Radio Rig</td>
+    <td>Hamlib NET rigctl</td>
+  </tr>
+  <tr>
+    <td>IP port for Hamlib</td>
+    <td>4532</td>
+    <td>Network Server</td>
+    <td>localhost:4532</td>
+  </tr>
+  <tr>
+    <td>Digital Tx0 Input</td>
+    <td>Use name QuiskDigitalInput</td>
+    <td>Audio Soundcard Output</td>
+    <td>QuiskDigitalInput</td>
+  </tr>
+  <tr>
+    <td>Digital Rx0 Output</td>
+    <td>Use name QuiskDigitalOutput.monitor</td>
+    <td>Audio Soundcard Input</td>
+    <td>QuiskDigitalOutput.monitor</td>
+  </tr>
+</table>
+<br><br>
 <h2 id="VNA">Vector Network Analyzer</h2>
+<p>
 If you have my transceiver hardware from 2010 QEX, or the newer HiQSDR
-hardware, or the Hermes-Lite you can use it as a vector network analyzer by using a
-special program. You must be using FPGA firmware version 1.3 or
-newer. Run the VNA program with "python quisk_vna.py" or use a
-shortcut. The VNA program will not work with SoftRock or other
-hardware. The "Help" button explains how to use it, and should
-get you started. This VNA program enables you to analyze your
-antennas without additional expense.
+hardware you can use it as a vector network analyzer by using a
+special program. As of 2021 the HL2 no longer works as a VNA. This may change in the future.
+Run the VNA program with "python quisk_vna.py" or use a
+shortcut. The VNA program will not work with SoftRock or other hardware.
+This VNA program enables you to analyze your antennas without additional expense.
 <br>
 
 <br>
@@ -1571,7 +1663,9 @@ chooses, these saved calibrations are used with linear interpolation.
 <br>
 
 <br>
+</p>
 <h3>HiQSDR Internals</h3>
+<p>
 When running in VNA mode the two control bytes [18:20] are the 16-bit
 non-zero VNA count "vna_count", the number of data points to
 send. This locks the transmit and receive frequency to the
@@ -1594,7 +1688,74 @@ are I/Q values at DC; that is, a complex number representing a voltage
 and phase.
 If vna_count is zero, the firmware is operating normally, and not in VNA mode.
 <br>
+<br>
 
+</p>
+<h2 id="Remote">Remote Operation</h2>
+<p>
+Ben, AC2YD, contributed a feature that enables you to run a radio at a remote location from a control
+head. The remote radio could be on your local area network or somewhere on the Internet. The remote radio
+is connected to a computer running Quisk, the computer could run Linux or Windows, and it could be
+a single-board computer such as Raspberry Pi. The two computers communicate using the TCP and UDP protocols.
+You can use either a wired connection or WiFi.
+The feature uses TCP port 4585 and two UDP ports 4586 and 4587. These must be open at the remote radio.
+It should not be necessary to open ports at the control head as it initiates all communication.
+A paper describing the original design is <a href="ac2yd/Design_2022_0531.pdf">here</a>.
+</p>
+<br>
+<p>
+The version of Quisk running on the control head must exactly match the version at the remote radio.
+Also, each type of radio has its own remote hardware file and control head hardware file. The supported
+radios are softrock, hermes and hiqsdr.
+</p>
+<br>
+<p>
+If you have dropouts in the sound, try increasing the "Play latency msec" on the Config/Timing screen. Quisk
+buffers sound, and the buffer size can be adjusted. 
+</p>
+<br>
+<p>
+Create a radio of type "Control Head", and on the Radio/Remote screen enter the IP address or host name
+of the remote radio and a password. Change the hardware file to ac2yd/control_softrock.py or
+ac2yd/control_hermes.py or ac2yd/control_hiqsdr.py. Enter the usual widget file for that radio if any.
+Create sound devices for radio sound and microphone sound. Do not create devices for samples or digital modes.
+</p>
+<br>
+<p>
+Create a radio of the correct type at the remote site. This must be softrock, hermes or hiqsdr.
+Configure the radio to correctly control the hardware. You should be able to operate successfully at the remote.
+Then change the hardware file to ac2yd/remote_softrock.py or ac2yd/remote_hermes.py or ac2yd/remote_hiqsdr.py. Enter the usual
+widget file if any. The radio will still operate normally unless the control head is connected. Enter
+the same password on the Radio/Remote screen. The password only needs to be entered once at each end.
+It is a "shared secret". Use a somewhat lengthy pass phrase of random words, at least 20 characters long.
+</p>
+<br>
+<p>
+You can use Windows, Mac or Linux at either end. But for Windows, the Windows Firewall will interfere.
+Do not turn the firewall off. Change the network profile type from the default Public to Private if
+you are on a private home network. The setting is under Settings, Network, WiFi or Ethernet, Network Profile.
+If you are on a public network, you should use a VPN for security. 
+</p>
+<br>
+<p>
+For security, Quisk will not accept remote operation unless the special hardware files are used. And the
+password or pass phrase must match. But you must (as usual) make sure both computers are secure and can not
+be broken into. You must (as usual) have a good router password and secure settings to protect your home network.
+</p>
+<br>
+<p>
+The AC2YD remote feature was designed to send back demodulated audio, not samples, in order to reduce the
+bandwidth to a minimum. Running digital modes on the control head would require more data streams for
+digital in/out. Also, note that recording samples to a file fails for the same reason. And most hardware
+config settings are inoperative on the control head. I can add some more interaction like a clip indicator,
+but complete control, such as adding recording samples, is a never-ending list.
+</p>
+<br>
+<p>
+Because of the low bandwidth and the time stamps on the CW keying, the AC2YD feature achieves fast classic ham
+radio over a network. For digital modes, it seems workable to run everything on the remote and control it with
+remote terminal software because fast response is not required.
+</p>
 <br>
 </div>
 

@@ -14,6 +14,65 @@ import quisk_utils
 from quisk_hardware_model import Hardware as BaseHardware
 
 DEBUG = 0
+DEBUG_I2C = 0
+
+class IOBoard:
+  "This class controls the N2ADR IO Board for the HermesLite 2"
+  def __init__(self, hardware):
+    self.DEBUG = 0
+    self.hardware = hardware
+    self.have_IO_Board = None
+    self.have_board_counter = 3
+    self.tx_timer = 0
+    self.current_tx_freq = 0
+  def HeartBeat(self):	# Called at 10 Hz for housekeeping tasks
+    if not QS.get_params('rx_udp_started'):
+      return
+    if self.have_IO_Board is None:
+      resp = self.hardware.ReadI2C(0x7d, 0x41, 0)	# Check for the N2ADR HL2 IO Board
+      if resp and resp[1] == 0xF1:
+        self.have_IO_Board = True
+        if self.DEBUG or DEBUG_I2C:
+          print ('Have IO_Board')
+        self.hardware.ImmediateChange('hermes_iob_rxin')
+      else:
+        self.have_board_counter -= 1
+        if self.have_board_counter == 0:
+          self.have_IO_Board = False
+          if self.DEBUG or DEBUG_I2C:
+            print ('No IO board')
+    if not self.have_IO_Board:
+      return
+    if self.hardware.tx_frequency != self.current_tx_freq and time.time() - self.tx_timer > 0.50:
+      self.current_tx_freq = self.hardware.tx_frequency
+      self.tx_timer = time.time()
+      tx = self.current_tx_freq		# Send Tx frequency to IO Board
+      self.hardware.WriteI2C(0x7d, 0x1D, 0, (tx >> 32) & 0xFF)	# MSB
+      self.hardware.WriteI2C(0x7d, 0x1D, 1, (tx >> 24) & 0xFF)
+      self.hardware.WriteI2C(0x7d, 0x1D, 2, (tx >> 16) & 0xFF)
+      self.hardware.WriteI2C(0x7d, 0x1D, 3, (tx >>  8) & 0xFF)
+      self.hardware.WriteI2C(0x7d, 0x1D, 13, tx        & 0xFF)	# LSB
+      #self.Receive()
+  def Receive(self, register=0):	# Get the response from the IO board
+    if not self.have_IO_Board:
+      return
+    ret = self.hardware.ReadI2C(0x7d, 0x1D, register)
+    if self.DEBUG:
+      print ('IO Board: 0x%X 0x%X 0x%X 0x%X 0x%X' % tuple(ret))
+    return ret
+  def FanLevel(self, level):
+    if not self.have_IO_Board:
+      return
+    # Send the fan level as I2C register 2
+    # level is an integer from 0 to 255
+    self.hardware.WriteI2C(0x7d, 0x1D, 12, level)
+  def AuxRxInput(self, mode):
+    # 0: The HL2 operates as usual. The receive input is not used. The Pure Signal input is available.
+    # 1: The receive input is used instead of the usual HL2 Rx input. Pure Signal is not available.
+    # 2: The receive input is used for Rx, and the Pure Signal input is used during Tx.
+    if not self.have_IO_Board:
+      return
+    self.hardware.WriteI2C(0x7d, 0x1D, 11, mode)
 
 class Hardware(BaseHardware):
   var_rates = ['48', '96', '192', '384']
@@ -29,10 +88,6 @@ class Hardware(BaseHardware):
     self.hermes_rev_power = 0.0
     self.hermes_pa_current = 0.0
     self.eeprom_valid = 0
-    self.alex_hpf_f1 = 0
-    self.alex_hpf_f2 = 0
-    self.alex_lpf_f1 = 0
-    self.alex_lpf_f2 = 0
     self.mode = None
     self.band = None
     self.vfo_frequency = 0
@@ -40,6 +95,12 @@ class Hardware(BaseHardware):
     self.vna_count = 0
     self.vna_started = False
     self.repeater_freq = None		# original repeater output frequency
+    self.antenna_labels = ('Ant 0', 'Ant 1')	# labels for the antenna button
+    self.antenna_index = 0			# index of antenna in use
+    self.delay_config = True			# Delay sending message to HL2 until after sound starts
+    self.TFRC_counter = 0		# Call for power etc. at intervals
+    self.key_was_down = 0
+    self.io_board = IOBoard(self)
     try:
       self.repeater_delay = conf.repeater_delay		# delay for changing repeater frequency in seconds
     except:
@@ -65,14 +126,22 @@ class Hardware(BaseHardware):
     # Addresses C0 = 0x12 through 0x3E use self.pc2hermeswritequeue, which is capable of requesting an ACK.
     #    C0 is a six-bit address. If the address is OR'd with 0x40, an ACK must be received or the item is re-transmitted.
     #    The item sent to the HL2 is C0<<1 | MoxBit.
+    #    Sound must be started before you can use pc2hermeswritequeue.
+    # General I2C bus Access:
+    # Address C0 = 0x3c writes to the I2C bus 1. Use C0 = 0x7c to request an ACK.
+    # Address C0 = 0x3d writes to the I2C bus 2. Use C0 = 0x7d to request an ACK.
+    # Read requests must use the ACK.
+    #    self.pc2hermeslitewritequeue[0:5] = C0, C1, C2, C3, C4
+    #    C1 = 0x06 to write, 0x07 to read
+    #    C2 = 7-bit I2C address | stop;  Where "stop" is 0x80 to stop at end; else zero for continue
+    #    C3 = 8-bit I2C control (often a register address)
+    #    C4 = 8-bit I2C data for write, else 0
     self.pc2hermeslitewritequeue = bytearray(4 * 5)	# Four of (C0, C1, C2, C3, C4)
     # Initialize some data
     self.pc2hermes[3] = 0x04	# C0 index == 0, C4[5:3]: number of receivers 0b000 -> one receiver; C4[2] duplex on
     self.pc2hermes[4 * 9] = 63	# C0 index == 0b1001, C1[7:0] Tx level
     for c0 in range(1, 9):		# Set all frequencies to 7012352, 0x006B0000
       self.SetControlByte(c0, 2, 0x6B)
-    self.SetLowPwrEnable(conf.hermes_lowpwr_tr_enable)
-    self.EnablePowerAmp(conf.hermes_power_amp)
     self.ChangeTxLNA(conf.hermes_TxLNA_dB)
     self.MakePowerCalibration()
   def pre_open(self):
@@ -114,7 +183,19 @@ class Hardware(BaseHardware):
           elif bid >= 0 and data[10] != bid:
             pass
           else:
-            st = 'Capture from Hermes device: Mac %2x:%2x:%2x:%2x:%2x:%2x, Code version %d, ID %d' % tuple(data[3:11])
+            if data[10] == 6:	# Hermes Lite
+              num_rx = int(data[0x13])
+              if num_rx < 1:
+                num_rx = 1
+              elif num_rx > 10:
+                num_rx = 10
+            else:
+              num_rx = 1
+            dta = data[3:10]
+            dta.append(data[0x15])
+            dta.append(num_rx)
+            dta.append(data[10])
+            st = 'Capture from Hermes: Mac %2x:%2x:%2x:%2x:%2x:%2x, Code version %d.%d, Rx %d, ID %d' % tuple(dta)
             self.hermes_mac = data[3:9]
             self.hermes_ip = addr[0]
             self.hermes_code_version = data[9]
@@ -177,8 +258,10 @@ class Hardware(BaseHardware):
     self.config_text = st
     self.ChangeLNA(2)	# Initialize the LNA using the correct LNA code from the FPGA code version
   def open(self):
-    self.ImmediateChange('hermes_tx_buffer_latency')
-    self.ImmediateChange('keyupDelay')
+    self.delay_config = True	# Delay sending message to HL2 until after sound starts
+    for name in ('hermes_tx_buffer_latency', 'keyupDelay',
+        'hermes_lowpwr_tr_enable', 'hermes_PWM', 'hermes_disable_sync', 'hermes_power_amp', 'Hermes_BandDictEnTx'):
+      self.ImmediateChange(name)
     return self.config_text
   def GetValue(self, name):	# return values stored in the hardware
     if name == 'Hware_Hl2_EepromIP':
@@ -268,15 +351,34 @@ class Hardware(BaseHardware):
     # Get the control byte at C0 index and byte index.  The bytes are C0, C1, C2, C3, C4.
     # The C0 index is 0 to 16 inclusive.  The byte index is 1 to 4.  The byte index of C2 is 2.
     return self.pc2hermes[C0_index * 4 + byte_index - 1]
-  def SetControlByte(self, C0_index, byte_index, value):		# Set the control byte as above.
+  def SetControlByte(self, C0_index, byte_index, value, prnt=True):		# Set the control byte as above.
     self.pc2hermes[C0_index * 4 + byte_index - 1] = value
     QS.pc_to_hermes(self.pc2hermes)
-    if DEBUG: print ("SetControlByte C0_index %d byte_index %d to 0x%X" % (C0_index, byte_index, value))
+    if DEBUG and prnt: print ("SetControlByte C0_index 0x%X byte_index %d to 0x%X" % (C0_index, byte_index, value))
+  def GetControlBit(self, C0_index, bit):
+    # Get the control bit (return 0 or 1) at C0 index and bit number 0 through 31.
+    byte_index = 4 - bit // 8
+    byte_value =  self.pc2hermes[C0_index * 4 + byte_index - 1]
+    mask = 0x01 << (bit % 8)
+    if byte_value & mask:
+      return 1
+    return 0
+  def SetControlBit(self, C0_index, bit, bit_value):
+    # Set the control bit at C0 index and bit number 0 through 31 to value (0 or 1).
+    byte_index = 4 - bit // 8
+    byte_value =  self.pc2hermes[C0_index * 4 + byte_index - 1]
+    mask = 0x01 << (bit % 8)
+    if bit_value:	# set bit to one
+      byte_value |= mask
+    else:		# set bit to zero
+      byte_value &= ~mask
+    self.pc2hermes[C0_index * 4 + byte_index - 1] = byte_value
+    QS.pc_to_hermes(self.pc2hermes)
+    #if DEBUG: print ("SetControlBit C0_index 0x%X byte_index %d to 0x%X" % (C0_index, byte_index, byte_value))
   def ChangeFrequency(self, tx_freq, vfo_freq, source='', band='', event=None):
     if tx_freq and tx_freq > 0:
-      if source == 'BtnBand' or abs(tx_freq - self.tx_frequency) > 1000000:
-        self.ChangeAlexFilters(tx_freq=tx_freq)
       self.tx_frequency = tx_freq
+      self.io_board.HeartBeat()
       tx = int(tx_freq - self.transverter_offset)
       self.pc2hermes[ 4] = tx >> 24 & 0xff		# C0 index == 1, C1, C2, C3, C4: Tx freq, MSB in C1
       self.pc2hermes[ 5] = tx >> 16 & 0xff
@@ -292,47 +394,6 @@ class Hardware(BaseHardware):
     if DEBUG > 1: print("Change freq Tx", tx_freq, "Rx", vfo_freq)
     QS.pc_to_hermes(self.pc2hermes)
     return tx_freq, vfo_freq
-  def ChangeAlexFilters(self, tx_freq=None, edit=False):
-    if tx_freq is None:
-      tx_freq = self.tx_frequency
-    fmin = tx_freq
-    fmax = tx_freq
-    for pane in self.application.multi_rx_screen.receiver_list:
-      freq = pane.VFO + pane.txFreq
-      if freq < fmin:
-        fmin = freq
-      if freq > fmax:
-        fmax = freq
-    if DEBUG: print ('fmin', fmin, 'fmax', fmax)
-    if edit or not (self.alex_hpf_f1 <= fmin < self.alex_hpf_f2):    # Within same HP filter?
-      self.alex_hpf_f1, self.alex_hpf_f2, rx, tx = self.FreqAlexFilters(fmin, self.conf.AlexHPF, self.conf.AlexHPF_TxEn)
-      if DEBUG: print ("Change HP filter fmin, f1, f2", fmin, self.alex_hpf_f1, self.alex_hpf_f2, "rx, tx", rx, tx)
-      QS.set_alex_hpf(rx, tx)
-    if edit or not (self.alex_lpf_f1 <= fmax < self.alex_lpf_f2):    # Within same LP filter?
-      self.alex_lpf_f1, self.alex_lpf_f2, rx, tx = self.FreqAlexFilters(fmax, self.conf.AlexLPF, self.conf.AlexLPF_TxEn)
-      if DEBUG: print ("Change LP filter fmax, f1, f2", fmax, self.alex_lpf_f1, self.alex_lpf_f2, "rx, tx", rx, tx)
-      QS.set_alex_lpf(rx, tx)
-  def FreqAlexFilters(self, tx_freq, filt, enabl):
-    # Find the new frequency band
-    gap1 = 0.0        # If we are in a gap in the filter frequencies, this is f1 and f2 for the gap.
-    gap2 = 1E20
-    for f1, f2, rx, tx in filt:  # f1 and f2 are strings in MHz
-      try:
-        f1 = float(f1) * 1E6
-        f2 = float(f2) * 1E6
-      except:
-        continue
-      if f1 >= f2:
-        continue
-      if f1 <= tx_freq < f2:
-        if not enabl:
-          tx = rx
-        return f1, f2, rx, tx
-      if tx_freq >= f2 and f2 > gap1:
-        gap1 = f2
-      if tx_freq <= f1 and f1 < gap2:
-        gap2 = f1
-    return gap1, gap2, 0, 0
   def Freq2Phase(self, freq=None):		# Return the phase increment as calculated by the FPGA
     # This code attempts to duplicate the calculation of phase increment in the FPGA code.
     clock = ((int(self.conf.rx_udp_clock) + 24000) // 48000) * 48000		# this assumes the nominal clock is a multiple of 48kHz
@@ -351,9 +412,22 @@ class Hardware(BaseHardware):
   def ReturnFrequency(self):	# Return the current tuning and VFO frequency
     return None, None			# frequencies have not changed
   def HeartBeat(self):
-    self.hermes_temperature, self.hermes_fwd_power, self.hermes_rev_power, self.hermes_pa_current = QS.get_hermes_TFRC()
-    if self.application.bottom_widgets:
-      self.application.bottom_widgets.UpdateText()
+    self.TFRC_counter += 1
+    key_down = QS.is_key_down()
+    if key_down and not self.key_was_down:	# reset on key down
+      self.TFRC_counter = 0
+      QS.get_hermes_TFRC()
+    self.key_was_down = key_down
+    if self.TFRC_counter >= 3:
+      self.TFRC_counter = 0
+      self.hermes_temperature, self.hermes_fwd_power, self.hermes_rev_power, self.hermes_pa_current, self.hermes_fwd_peak, self.hermes_rev_peak = QS.get_hermes_TFRC()
+      if self.application.bottom_widgets:
+        self.application.bottom_widgets.UpdateText()
+    if self.delay_config and QS.get_params('rx_udp_started'):
+      self.delay_config = False
+      for name in ('hermes_disable_watchdog', 'hermes_reset_on_disconnect', 'hermes_iob_rxin'):
+        self.ImmediateChange(name)
+    self.io_board.HeartBeat()
   def RepeaterOffset(self, offset=None):	# Change frequency for repeater offset during Tx
     if offset is None:		# Return True if frequency change is complete
       if time.time() > self.repeater_time0 + self.repeater_delay:
@@ -375,7 +449,14 @@ class Hardware(BaseHardware):
     self.band = band
     self.ChangeBandFilters()
     self.SetTxLevel()
+  def OnButtonAntenna(self, event):
+    btn = event.GetEventObject()
+    self.antenna_index = btn.index
+    self.ChangeBandFilters()
   def ChangeBandFilters(self):
+    if not hasattr(self.application, "multi_rx_screen"):
+      return	# Needed for the VNA program
+    self.SetControlBit(0x00, 13, self.antenna_index)
     highest = self.band
     freq = self.conf.BandEdge.get(highest, (0, 0))[0]
     for pane in self.application.multi_rx_screen.receiver_list:
@@ -383,14 +464,26 @@ class Hardware(BaseHardware):
       if freq < f:
         freq = f
         highest = pane.band
+    # Set Hermes Rx and Tx filters for C0 == 0x00, C2[7:1]
     Rx = self.conf.Hermes_BandDict.get(highest, 0)
-    self.SetControlByte(0, 2, Rx << 1)		# C0 index == 0, C2[7:1]: user output
+    self.SetControlByte(0, 2, Rx << 1, False)	# C0 index == 0, C2[7:1]: user output
     if self.conf.Hermes_BandDictEnTx:
       Tx = self.conf.Hermes_BandDictTx.get(self.band, 0)	# Use Tx filter
     else:
-      Tx = self.conf.Hermes_BandDict.get(self.band, 0)		# Use Rx filter
+      Tx = self.conf.Hermes_BandDict.get(self.band, 0)		# Use the Rx filter for the Tx band
     QS.set_hermes_filters(Rx, Tx)
-    self.ChangeAlexFilters()
+    if DEBUG: print("Change Hermes Band Filters: Antenna %d Rx 0x%X Tx 0x%X" % (self.antenna_index, Rx, Tx))
+    # Set Alex filters for C0 == 0x09
+    rx_value = Rx & 0x7F
+    if self.antenna_index:
+      rx_value |= 0x80
+    self.SetControlByte(0x09, 3, rx_value, False)	# C0 index == 0x09, C3, Rx filter
+    Tx = self.conf.Hermes_BandDictTx.get(self.band, 0)	# Tx filter
+    tx_value = Tx & 0x7F
+    if self.antenna_index:
+      tx_value |= 0x80
+    self.SetControlByte(0x09, 4, tx_value, False)	# C0 index == 0x09, C4, Tx filter
+    if DEBUG: print("Change Alex Band Filters: Antenna %d Rx 0x%X Tx 0x%X" % (self.antenna_index, rx_value, tx_value))
   def ChangeMode(self, mode):
     # mode is a string: "USB", "AM", etc.
     BaseHardware.ChangeMode(self, mode)
@@ -398,7 +491,18 @@ class Hardware(BaseHardware):
     self.SetTxLevel()
   def OnSpot(self, level):
     # level is -1 for Spot button Off; else the Spot level 0 to 1000.
-    pass
+    if level < 0 or self.conf.hermes_antenna_tuner != "Tune":
+      self.SetControlBit(0x09, 17, 0)
+      self.SetControlBit(0x09, 20, 0)
+      if DEBUG: print("OnSpot antenna tuner: Off")
+    elif level == 0:
+      self.SetControlBit(0x09, 17, 1)		# Bypass tuner if bit 17 set
+      self.SetControlBit(0x09, 20, 1)
+      if DEBUG: print("OnSpot antenna tuner: Bypass")
+    else:
+      self.SetControlBit(0x09, 17, 0)
+      self.SetControlBit(0x09, 20, 1)
+      if DEBUG: print("OnSpot antenna tuner: Tune")
   def VarDecimGetChoices(self):		# return text labels for the control
     return self.var_rates
   def VarDecimGetLabel(self):		# return a text label for the control
@@ -452,8 +556,12 @@ class Hardware(BaseHardware):
     if DEBUG: print ("Change LNA to", value)
   def ChangeTxLNA(self, value):		# LNA for Tx
     # value is -12 to +48
+    if value < -12:
+      value = -12
+    elif value > 48:
+      value = 48
     value = ((value+12) & 0x3f) | 0x40 | 0x80
-    self.SetControlByte(0x0e, 3, value)		# C0 index == 0x0e, C3
+    self.SetControlByte(0x0e, 3, value, False)		# C0 index == 0x0e, C3
     QS.pc_to_hermes(self.pc2hermes)
     if DEBUG: print ("Change Tx LNA to", value)
   def SetTxLevel(self):
@@ -488,6 +596,7 @@ class Hardware(BaseHardware):
     QS.pc_to_hermes(self.pc2hermes)
   def SetVNA(self, key_down=None, vna_start=None, vna_stop=None, vna_count=None, do_tx=False):
     if vna_count is not None:	# must be called first
+      if DEBUG: print("vna_count", vna_count)
       self.vna_count = vna_count
     if vna_start is None:
       start = 0
@@ -522,38 +631,20 @@ class Hardware(BaseHardware):
       if not self.vna_started:
         self.vna_started = True
         self.SetControlByte(9, 2, 0x80)		# turn on VNA mode
-      QS.set_PTT(1)
+        if DEBUG: print("vna_started TRUE")
+      QS.set_key_down(1)
+      if DEBUG: print ("vna key down")
     else:
-      QS.set_PTT(0)
+      QS.set_key_down(0)
+      if DEBUG: print ("vna key up")
     return start, stop	# Return actual frequencies after all phase rounding
-  def EnablePowerAmp(self, enable):
-    if enable:
-      self.pc2hermes[4 * 9 + 1] |= 0x08		# C0 index == 9, C2
-    else:
-      self.pc2hermes[4 * 9 + 1] &= ~0x08
-    QS.pc_to_hermes(self.pc2hermes)
-    if DEBUG: print ("Change PwrAmp 0x%X" % (self.pc2hermes[4*9 + 1]))
-  def SetLowPwrEnable(self, enable):
-    if enable:
-      self.pc2hermes[4 * 9 + 1] |= 0x04		# C0 index == 9, C2
-    else:
-      self.pc2hermes[4 * 9 + 1] &= ~0x04
-    QS.pc_to_hermes(self.pc2hermes)
-    if DEBUG: print ("Change LpPwrEnable 0x%X" % (self.pc2hermes[4*9 + 1]))
-  def DisableSyncFreq(self, value):	# Thanks to Steve, KF7O
-    if value:
-      self.pc2hermes[4 * 0 + 2] |= 0x10   # C0 index == 0, C3
-    else:
-      self.pc2hermes[4 * 0 + 2] &= ~0x10
-    QS.pc_to_hermes(self.pc2hermes)
-    if DEBUG: print ("Change SyncFreq 0x%X" % (self.pc2hermes[4*0 + 2]))
   def ImmediateChange(self, name):
     if name == 'keyupDelay':
       value = self.conf.keyupDelay
       if value > 1023:
         value = 1023
-      self.SetControlByte(0x10, 2, value & 0x3)		# cw_hang_time
-      self.SetControlByte(0x10, 1, (value >> 2) & 0xFF)	# cw_hang_time
+      self.SetControlByte(0x10, 2, value & 0x3, False)		# cw_hang_time
+      self.SetControlByte(0x10, 1, (value >> 2) & 0xFF, False)	# cw_hang_time
       if DEBUG: print ("Change keyup delay to", value)
     elif name in ('hermes_tx_buffer_latency', 'hermes_PTT_hang_time'):
       lat = self.conf.hermes_tx_buffer_latency
@@ -569,6 +660,68 @@ class Hardware(BaseHardware):
       self.pc2hermeslitewritequeue[0:5] = 0x17 | 0x40, 0, 0, hang, lat
       self.WriteQueue(1)
       if DEBUG: print ("Change tx_buffer_latency %d, PTT_hang_time %d" % (lat, hang))
+    elif name == 'hermes_PWM':
+      if self.conf.hermes_PWM[0:4] == 'Fan ':
+        self.SetControlBit(0x00, 11, 0)
+      else:
+        self.SetControlBit(0x00, 11, 1)
+      if DEBUG: print ("Change hermes_PWM to", self.conf.hermes_PWM)
+    elif name == 'hermes_disable_sync':
+      if self.conf.hermes_disable_sync:
+        self.SetControlBit(0x00, 12, 1)
+        if DEBUG: print ("Set hermes_disable_sync")
+      else:
+        self.SetControlBit(0x00, 12, 0)
+        if DEBUG: print ("Clear hermes_disable_sync")
+    elif name == 'hermes_disable_watchdog':
+      if self.conf.hermes_disable_watchdog:
+        self.pc2hermeslitewritequeue[0:5] = 0x39 | 0x40, 0x09, 0, 0, 0
+        self.WriteQueue(1)
+        if DEBUG: print ("Set hermes_disable_watchdog")
+      else:
+        self.pc2hermeslitewritequeue[0:5] = 0x39 | 0x40, 0x08, 0, 0, 0
+        self.WriteQueue(1)
+        if DEBUG: print ("Clear hermes_disable_watchdog")
+    elif name == 'hermes_reset_on_disconnect':
+      if self.conf.hermes_reset_on_disconnect:
+        self.pc2hermeslitewritequeue[0:5] = 0x3A | 0x40, 0, 0, 0, 0x01
+        self.WriteQueue(1)
+        if DEBUG: print ("Set hermes_reset_on_disconnect")
+      else:
+        self.pc2hermeslitewritequeue[0:5] = 0x3A | 0x40, 0, 0, 0, 0
+        self.WriteQueue(1)
+        if DEBUG: print ("Clear hermes_reset_on_disconnect")
+    elif name == 'hermes_lowpwr_tr_enable':
+      if self.conf.hermes_lowpwr_tr_enable:
+        self.SetControlBit(0x09, 18, 1)
+      else:
+        self.SetControlBit(0x09, 18, 0)
+      if DEBUG: print ("Change disable T/R in low power to", self.conf.hermes_lowpwr_tr_enable)
+    elif name == 'hermes_power_amp':
+      if self.conf.hermes_power_amp:
+        self.SetControlBit(0x09, 19, 1)
+      else:
+        self.SetControlBit(0x09, 19, 0)
+      if DEBUG: print ("Change power_amp to", self.conf.hermes_power_amp)
+    elif name == 'Hermes_BandDictEnTx':
+      if self.conf.Hermes_BandDictEnTx:
+        self.SetControlBit(0x09, 22, 1)
+      else:
+        self.SetControlBit(0x09, 22, 0)
+      if DEBUG: print ("Change Alex manual mode to", self.conf.Hermes_BandDictEnTx)
+      self.ChangeBandFilters()
+    elif name == 'hermes_antenna_tuner':
+      pass
+    elif name == 'hermes_iob_rxin':
+      mode = self.conf.hermes_iob_rxin[0:4]
+      if mode == 'J10 ':
+        self.io_board.AuxRxInput(0)
+      elif mode == 'HL2 ':
+        self.io_board.AuxRxInput(1)
+      elif mode == 'Use ':
+        self.io_board.AuxRxInput(2)
+    else:
+      if DEBUG: print ("Immediate change: no such name", name)
   def EnableBiasChange(self, enable):
     # Bias settings are in location 12, 13, 14, 15, and are not sent unless C1 == 0x06
     if enable:
@@ -629,8 +782,10 @@ class Hardware(BaseHardware):
       time.sleep(dt)
       dt *= 2
       if dt > 0.300:
-        print("ERROR: Hermes-Lite write queue timeout")
+        print("ERROR: Hermes-Lite write queue timeout, queue 0x%x 0x%x 0x%x 0x%x 0x%x" % tuple(self.pc2hermeslitewritequeue[0:5]))
         return
+    if qlen <= 0:	# Do not add to queue, just finish last write
+      return
     ## Send next write(s)
     QS.pc_to_hermeslite_writequeue(self.pc2hermeslitewritequeue)
     QS.set_hermeslite_writepointer(qlen)
@@ -794,6 +949,49 @@ class Hardware(BaseHardware):
       else:
         if DEBUG: print("EEPROM read {0:#x} from address {1:#x}".format(v0,addr))
       return v0
+  def WriteI2C(self, bus, i2caddr, control, value):
+    # bus is 0x7c or 0x7d
+    self.WriteQueue(0)		# Finish any writes
+    self.pc2hermeslitewritequeue[0:5] = bus, 0x06, i2caddr, control, value
+    QS.clear_hermeslite_response()
+    self.WriteQueue(1)
+    if bus & 0x40:	# response was requested
+      for j in range(50):
+        time.sleep(0.001)
+        resp = QS.get_hermeslite_response()
+        if resp[0] != 0:
+          #print ("0x%X 0x%X 0x%X 0x%X 0x%X" % tuple(resp))
+          if bus & 0x3F == (resp[0] >> 1) & 0x3F:
+            if DEBUG_I2C or DEBUG:
+              print ("Write I2C bus OK 0x%X, i2caddr 0x%X, control 0x%X, value 0x%X" % (bus, i2caddr, control, value))
+          else:
+            if DEBUG_I2C or DEBUG:
+              print ("Write I2C bus ERROR 0x%X, i2caddr 0x%X, control 0x%X, value 0x%X" % (bus, i2caddr, control, value))
+          break
+      else:
+        if DEBUG_I2C or DEBUG:
+          print ("Write I2C bus TIMEOUT 0x%X, i2caddr 0x%X, control 0x%X, value 0x%X" % (bus, i2caddr, control, value))
+    else:
+      if True or DEBUG: print ("Write I2C bus 0x%X, i2caddr 0x%X, control 0x%X, value 0x%X" % (bus, i2caddr, control, value))
+  def ReadI2C(self, bus, i2caddr, control):
+    # bus is 0x7c or 0x7d
+    self.WriteQueue(0)		# Finish any writes
+    self.pc2hermeslitewritequeue[0:5] = bus, 0x07, i2caddr, control, 0
+    QS.clear_hermeslite_response()
+    self.WriteQueue(1)
+    for j in range(50):
+      time.sleep(0.001)
+      resp = QS.get_hermeslite_response()
+      if resp[0] != 0:
+        break
+    else:
+      if DEBUG_I2C or DEBUG:
+        print("ReadI2C timed out and did not return a value")
+      return None
+    resp[0] = (resp[0] >> 1) & 0x3F	# 6-bit bus in C0
+    if DEBUG_I2C or DEBUG:
+      print ("Read  I2C bus 0x%X, 0x%X, 0x%X, 0x%X, 0x%X " % tuple(resp))
+    return resp
   def ProgramGateware(self, event):	# Program the Gateware (FPGA firmware) over Ethernet
     title = "Program the Gateware"
     main_frame = self.application.main_frame

@@ -7,12 +7,15 @@
  * Note that there is NO WARRANTY AT ALL.  USE AT YOUR OWN RISK!!
 
 */
+#ifdef QUISK_HAVE_WASAPI
+
 #define UNICODE
 #include <Python.h>
 #include <complex.h>
 #include <math.h>
 #include "quisk.h"
 #include <stdint.h>
+#include <stdatomic.h>
 #define INITGUID
 #define CINTERFACE
 #define COBJMACROS
@@ -22,10 +25,8 @@
 #include <mmreg.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <avrt.h>
-#include <Ksmedia.h>
+#include <ksmedia.h>
 #include <processthreadsapi.h>
-
-int quisk_midi_cwkey;
 
 #define EXIT_ON_ERROR(hres)  \
 	if (FAILED(hres)) { goto Exit; }
@@ -57,21 +58,42 @@ struct dev_data_t {
 	IAudioClient *pAudioClient;
 	IAudioCaptureClient *pCaptureClient;
 	IAudioRenderClient *pRenderClient;
-	UINT32 bufferSizeFrames;
+	UINT32 bufferSizeFrames;	// size of the Wasapi buffer in frames
+	AUDCLNT_SHAREMODE sharemode;
 	HANDLE hEvent;
-	int playbuf_read_reset;		// playbuf is used for the play device threadproc
-	int playbuf_write_reset;
+	int playbuf_underrun_reset;		// playbuf is used for the play device threadproc
+	int playbuf_underrun_msg;
+	int playbuf_overflow_reset;
 	int playbuf_nFrames;
-	int playbuf_iRead;
-	int playbuf_iWrite;
-	unsigned char * playbuf_buf;	// samples are IQIQIQ...
+	_Atomic int64_t playbuf_nRead;  // Total number of frames read from buffer
+	_Atomic int64_t playbuf_nWrite; // Total number of frames written to buffer
+	unsigned char * playbuf_buf;	// frames are in native format
 } ;
 
 static LPWSTR to_pwsz(const char *str) {	// Convert UTF-8 string to Wide Character string.
 	static wchar_t wchar_buffer[256];
-	if (MultiByteToWideChar(CP_UTF8, MB_PRECOMPOSED, str, -1, wchar_buffer, 256) == 0)
+	if (MultiByteToWideChar(CP_UTF8, 0, str, -1, wchar_buffer, 256) == 0)
 		return NULL;
 	return wchar_buffer;
+}
+
+static void quisk_reset_audio_device(struct sound_dev * dev)
+{  // Contributed by Ben Cahill, AC2YD, February 2021
+	struct dev_data_t * DD = dev->device_data;
+	HRESULT hr;
+
+	hr = IAudioClient_Stop(DD->pAudioClient);
+	if (hr != S_OK) {
+		QuiskPrintf("%s:  IAudioClient_Stop() returned hr = 0x%lx!!\n", dev->stream_description, hr);
+	}
+	hr = IAudioClient_Reset(DD->pAudioClient);
+	if (hr != S_OK) {
+		QuiskPrintf("%s:  IAudioClient_Reset() returned hr = 0x%lx\n!!", dev->stream_description, hr);
+	}
+	hr = IAudioClient_Start(DD->pAudioClient);
+	if (hr != S_OK) {
+		QuiskPrintf("%s:  IAudioClient_Start() returned hr = 0x%lx!!", dev->stream_description, hr);
+	}
 }
 
 static void close_device(struct sound_dev *, const char *);
@@ -84,10 +106,12 @@ static DWORD WINAPI playdevice_threadproc(LPVOID lpParameter)	// Called by a spe
 	DWORD retval;
 	BYTE * pData;
 	BYTE * ptSamples;
-	int i, two, ch_I, ch_Q, frames_in_buffer, bytes_per_sample, bytes_per_frame, iRead;
+        int64_t nRead, nWrite;
+	int i, two, ch_I, ch_Q, frames_in_buffer, bytes_per_sample, bytes_per_frame, index, frames_to_end;
 	DWORD taskIndex = 0;
 	HANDLE hTask;
-
+	UINT32 write_frames;
+	UINT32 NumPaddingFrames;
 	if (CoInitializeEx(NULL, COINIT_APARTMENTTHREADED) != S_OK)
 		QuiskPrintf("%s:  CoInitializeEx failed\n", dev->stream_description);
 	hTask = AvSetMmThreadCharacteristics(TEXT("Pro Audio"), &taskIndex);
@@ -97,18 +121,15 @@ static DWORD WINAPI playdevice_threadproc(LPVOID lpParameter)	// Called by a spe
 		close_device(dev, "Could not create playback client");
 		return 1;
 	}
-	// Load the buffer with silence before starting the stream.
-	if (SUCCEEDED(IAudioRenderClient_GetBuffer(DD->pRenderClient, DD->bufferSizeFrames, &pData)))
-		IAudioRenderClient_ReleaseBuffer(DD->pRenderClient, DD->bufferSizeFrames, AUDCLNT_BUFFERFLAGS_SILENT);
+	if (DD->sharemode == AUDCLNT_SHAREMODE_EXCLUSIVE) {
+		// Load the buffer with silence before starting the stream.
+		if (SUCCEEDED(IAudioRenderClient_GetBuffer(DD->pRenderClient, DD->bufferSizeFrames, &pData)))
+			IAudioRenderClient_ReleaseBuffer(DD->pRenderClient, DD->bufferSizeFrames, AUDCLNT_BUFFERFLAGS_SILENT);
+	}
 	dev->handle = DD->pRenderClient;
 	if (FAILED(IAudioClient_Start(DD->pAudioClient))) {
 		close_device(dev, "Could not start");
 		return 1;
-	}
-	if (quisk_sound_state.verbose_sound) {
-		QuiskPrintf("  Playback buffer size %d frames\n", DD->bufferSizeFrames);
-		QuiskPrintf("  Callback ring buffer size %d frames\n", DD->playbuf_nFrames);
-		QuiskPrintf("  Started.\n");
 	}
 	while (1) {
 		// Wait for next buffer event to be signaled.
@@ -117,33 +138,46 @@ static DWORD WINAPI playdevice_threadproc(LPVOID lpParameter)	// Called by a spe
 			break;
 		if (DD == NULL || dev->handle == NULL)
 			break;
-		if (IAudioRenderClient_GetBuffer(DD->pRenderClient, DD->bufferSizeFrames, &pData) != S_OK) {
+		if (DD->sharemode == AUDCLNT_SHAREMODE_EXCLUSIVE) {
+			write_frames = DD->bufferSizeFrames;
+		}
+		else {
+			if (IAudioClient_GetCurrentPadding(DD->pAudioClient, &NumPaddingFrames) != S_OK) {
+				QuiskPrintf("%s:  playdevice: GetCurrentPadding failed\n", dev->stream_description);
+		        	dev->dev_error++;
+				continue;
+			}
+			write_frames = DD->bufferSizeFrames - NumPaddingFrames;
+			if (write_frames == 0)
+				continue;
+		}
+		if (IAudioRenderClient_GetBuffer(DD->pRenderClient, write_frames, &pData) != S_OK) {
 			QuiskPrintf("%s:  playdevice: GetBuffer failed\n", dev->stream_description);
+		        dev->dev_error++;
 			continue;
 		}
-		if (quisk_play_state < RECEIVE) {
-			DD->playbuf_iRead = 0;
-			DD->playbuf_read_reset = 0;
-			IAudioRenderClient_ReleaseBuffer(DD->pRenderClient, DD->bufferSizeFrames, AUDCLNT_BUFFERFLAGS_SILENT);
+		if (quisk_play_state < RECEIVE) {       // Shutdown or Starting
+			DD->playbuf_underrun_reset = 0;
+			IAudioRenderClient_ReleaseBuffer(DD->pRenderClient, write_frames, AUDCLNT_BUFFERFLAGS_SILENT);
 			continue;
 		}
-		iRead = DD->playbuf_iRead;
-		frames_in_buffer = DD->playbuf_iWrite - iRead;       // must be atomic
-		if (frames_in_buffer < 0)
-			frames_in_buffer += DD->playbuf_nFrames;
-		if (DD->playbuf_read_reset) {
+		nRead = atomic_load(&DD->playbuf_nRead);
+		nWrite = atomic_load(&DD->playbuf_nWrite);
+		frames_in_buffer = nWrite - nRead;
+		if (DD->playbuf_underrun_reset) {
 			if (frames_in_buffer >= DD->playbuf_nFrames / 2) {
-				DD->playbuf_read_reset = 0;
+				DD->playbuf_underrun_reset = 0;
 			}
 			else {
-				IAudioRenderClient_ReleaseBuffer(DD->pRenderClient, DD->bufferSizeFrames, AUDCLNT_BUFFERFLAGS_SILENT);
+				IAudioRenderClient_ReleaseBuffer(DD->pRenderClient, write_frames, AUDCLNT_BUFFERFLAGS_SILENT);
 				continue;
 			}
 		}
-		else if (frames_in_buffer <= DD->bufferSizeFrames) {
-			DD->playbuf_read_reset = 1;
+		else if (frames_in_buffer < write_frames) {
+			DD->playbuf_underrun_reset = 1;
+			DD->playbuf_underrun_msg = 1;
 			dev->dev_underrun++;
-			IAudioRenderClient_ReleaseBuffer(DD->pRenderClient, DD->bufferSizeFrames, AUDCLNT_BUFFERFLAGS_SILENT);
+			IAudioRenderClient_ReleaseBuffer(DD->pRenderClient, write_frames, AUDCLNT_BUFFERFLAGS_SILENT);
 			continue;
 		}
 		two = dev->num_channels >= 2;
@@ -152,7 +186,7 @@ static DWORD WINAPI playdevice_threadproc(LPVOID lpParameter)	// Called by a spe
 		bytes_per_sample = dev->sample_bytes;
 		bytes_per_frame = bytes_per_sample * dev->num_channels;
 		if ((rxMode == CWU || rxMode == CWL) && quiskSpotLevel < 0 && dev->dev_index == t_MicPlayback) {	// SoftRock Tx CW from wasapi
-			for (i = 0; i < DD->bufferSizeFrames; i++) {
+			for (i = 0; i < write_frames; i++) {
 				ptSamples = quisk_make_txIQ(dev, 0);
 				memcpy(pData + ch_I * bytes_per_sample, ptSamples, bytes_per_sample);
 				if (two) {
@@ -163,7 +197,7 @@ static DWORD WINAPI playdevice_threadproc(LPVOID lpParameter)	// Called by a spe
 			}
 		}
 		else if (quisk_play_state > RECEIVE && quisk_active_sidetone == 1 && dev->dev_index == t_Playback) {	// Sidetone from wasapi
-			for (i = 0; i < DD->bufferSizeFrames; i++) {
+			for (i = 0; i < write_frames; i++) {
 				ptSamples = quisk_make_sidetone(dev, 0);
 				memcpy(pData + ch_I * bytes_per_sample, ptSamples, bytes_per_sample);
 				if (two)
@@ -172,30 +206,21 @@ static DWORD WINAPI playdevice_threadproc(LPVOID lpParameter)	// Called by a spe
 			}
 		}
 		else {		// copy sound samples from the buffer to the sound device.
-			ptSamples = DD->playbuf_buf + iRead * bytes_per_sample * 2;
-			if (dev->num_channels == 2 && ch_I == 0 && ch_Q == 1 && iRead + DD->bufferSizeFrames < DD->playbuf_nFrames) {	// check for fast copy
-				memcpy(pData, ptSamples, DD->bufferSizeFrames * bytes_per_frame);
+                        index = nRead % DD->playbuf_nFrames;
+			frames_to_end = DD->playbuf_nFrames - index;
+			ptSamples = DD->playbuf_buf + index * bytes_per_frame;
+			if (write_frames <= frames_to_end) {
+				memcpy(pData, ptSamples, write_frames * bytes_per_frame);
 			}
 			else {
-				for (i = 0; i < DD->bufferSizeFrames; i++) {
-					memcpy(pData + ch_I * bytes_per_sample, ptSamples, bytes_per_sample);
-					ptSamples += bytes_per_sample;
-					if (two)
-						memcpy(pData + ch_Q * bytes_per_sample, ptSamples, bytes_per_sample);
-					ptSamples += bytes_per_sample;
-					pData += bytes_per_frame;
-					if (++iRead >= DD->playbuf_nFrames) {	// end of buffer; go to start
-						iRead = 0;
-						ptSamples = DD->playbuf_buf;
-					}
-				}
+				memcpy(pData, ptSamples, frames_to_end * bytes_per_frame);
+				memcpy(pData + frames_to_end * bytes_per_frame,
+					DD->playbuf_buf, (write_frames - frames_to_end) * bytes_per_frame);
 			}
 		}
-		IAudioRenderClient_ReleaseBuffer(DD->pRenderClient, DD->bufferSizeFrames, 0);
-		iRead = DD->playbuf_iRead + DD->bufferSizeFrames;	// update read index
-		if (iRead >= DD->playbuf_nFrames)
-			iRead -= DD->playbuf_nFrames;
-		DD->playbuf_iRead = iRead;	// must be atomic
+		IAudioRenderClient_ReleaseBuffer(DD->pRenderClient, write_frames, 0);
+		nRead = nRead + write_frames;	// update number of frames read
+		atomic_store(&DD->playbuf_nRead, nRead);
 	}
 	AvRevertMmThreadCharacteristics(hTask);
 	if (quisk_sound_state.verbose_sound)
@@ -206,43 +231,37 @@ static DWORD WINAPI playdevice_threadproc(LPVOID lpParameter)	// Called by a spe
 
 void quisk_write_wasapi(struct sound_dev * dev, int nSamples, complex double * cSamples, double volume)
 {	// Called from Quisk by the sound thread. Write samples to the playdevice threadproc buffer.
-	// The ring buffer always stores samples as: IQIQIQIQ...
+	// The ring buffer always stores samples as native frames.
 	struct dev_data_t * DD = dev->device_data;
-	int i, frames_in_buffer, iWrite;
+        int64_t nRead, nWrite;
+	int i, frames_in_buffer, index, bytes_per_frame, num_channels, ch_I, ch_Q;
 	int8_t * ptInt8;
 	int16_t * ptInt16;
 	int32_t * ptInt32;
 	float   * ptFloat;
 	int32_t samp32;
 	unsigned char * buffer_end;
-	double tm;
-	float buffer_fill;
 	//QuiskPrintTime("write play buffer", 0);
 	//QuiskMeasureRate("write_wasapi", nSamples, 1, 1);
 	if (quisk_play_state < RECEIVE)
 		return;
 	if (DD == NULL || dev->handle == NULL)
 		return;
-	iWrite = DD->playbuf_iWrite;
-	frames_in_buffer = iWrite - DD->playbuf_iRead;		// must be atomic
-	if (frames_in_buffer < 0)
-		frames_in_buffer += DD->playbuf_nFrames;
+	nRead = atomic_load(&DD->playbuf_nRead);
+	nWrite = atomic_load(&DD->playbuf_nWrite);
+	frames_in_buffer = nWrite - nRead;
+	dev->cr_average_fill += (double)(frames_in_buffer + nSamples / 2) / DD->playbuf_nFrames;
+	dev->cr_average_count++;
 	dev->dev_latency = frames_in_buffer + nSamples;		// frames in buffer available to play
-	buffer_fill = (float)dev->dev_latency / DD->playbuf_nFrames;
 	if (quisk_sound_state.verbose_sound) {
-		if (frames_in_buffer <= DD->bufferSizeFrames)
-			QuiskPrintf("%s:  playdevice: buffer underflow\n", dev->stream_description);
-		if (quisk_sound_state.verbose_sound > 1) {
-			tm = QuiskTimeSec();
-			if (tm - dev->TimerTime0 > 10.000) {
-				QuiskPrintf("%s:  Buffer fill %.2f%%\n", dev->stream_description, buffer_fill * 100);
-				dev->TimerTime0 = tm;
-			}
-		}
+		if (DD->playbuf_underrun_msg) {
+                        DD->playbuf_underrun_msg = 0;
+			QuiskPrintf("%s:  playbuf underflow\n", dev->stream_description);
+                }
 	}
-	if (DD->playbuf_write_reset) {
+	if (DD->playbuf_overflow_reset) {
 		if (frames_in_buffer <= DD->playbuf_nFrames / 2) {
-			DD->playbuf_write_reset = 0;
+			DD->playbuf_overflow_reset = 0;
 			if (quisk_sound_state.verbose_sound)
 				QuiskPrintf("%s:  play_buffer overflow recovery frames_in_buffer %d, nSamples %d\n", dev->stream_description,
 					frames_in_buffer, nSamples);
@@ -253,119 +272,110 @@ void quisk_write_wasapi(struct sound_dev * dev, int nSamples, complex double * c
 		}
 	}
 	if (frames_in_buffer + nSamples >= DD->playbuf_nFrames) {
-		if (quisk_sound_state.verbose_sound)
-			QuiskPrintf("%s:  play_buffer overflow frames_in_buffer %d, nSamples %d\n", dev->stream_description,
-					frames_in_buffer, nSamples);
 		dev->dev_error++;
 		nSamples = DD->playbuf_nFrames * 9 / 10 - frames_in_buffer;     // almost fill buffer
-		if (nSamples < 0)      // buffer is nearly full
-			DD->playbuf_write_reset = 1;
-	}
-	else if (buffer_fill > 0.7 && nSamples > 0) {
-		nSamples--;	// buffer too full, remove a sample
-	}
-	else if (buffer_fill < 0.3 && nSamples >= 2) {
-		cSamples[nSamples] = cSamples[nSamples - 1];
-		cSamples[nSamples - 1] = (cSamples[nSamples - 2] + cSamples[nSamples]) / 2.0;
-		nSamples++;	// buffer too empty, add a sample
+		if (nSamples < 0) {      // buffer is nearly full
+			DD->playbuf_overflow_reset = 1;
+			quisk_reset_audio_device(dev);	// Ben Cahill: Correct fault in the play callback thread
+			if (quisk_sound_state.verbose_sound)
+				QuiskPrintf("%s:  play_buffer overflow and reset, frames_in_buffer %d, nSamples %d\n", dev->stream_description, frames_in_buffer, nSamples);
+		}
+		else if (quisk_sound_state.verbose_sound) {
+			QuiskPrintf("%s:  play_buffer overflow, frames_in_buffer %d, nSamples %d\n", dev->stream_description, frames_in_buffer, nSamples);
+		}
 	}
 	if (nSamples <= 0)
 		return;
-	buffer_end = DD->playbuf_buf + DD->playbuf_nFrames * dev->sample_bytes * 2;
+	ch_I = dev->channel_I;
+	ch_Q = dev->channel_Q;
+	bytes_per_frame = dev->sample_bytes * dev->num_channels;
+        num_channels = dev->num_channels;
+        index = nWrite % DD->playbuf_nFrames;
+	buffer_end = DD->playbuf_buf + DD->playbuf_nFrames * bytes_per_frame;
 	switch (dev->sound_format) {
 	case Int16:
-		ptInt16 = (int16_t *)(DD->playbuf_buf + iWrite * dev->sample_bytes * 2);
+		ptInt16 = (int16_t *)(DD->playbuf_buf + index * bytes_per_frame);
 		for (i = 0; i < nSamples; i++) {		// for each frame
-			*ptInt16++ = volume * creal(cSamples[i]) / 65536;
-			*ptInt16++ = volume * cimag(cSamples[i]) / 65536;
+			ptInt16[ch_I] = volume * creal(cSamples[i]) / 65536;
+			ptInt16[ch_Q] = volume * cimag(cSamples[i]) / 65536;
+                        ptInt16 += num_channels;
 			if ((unsigned char *)ptInt16 >= buffer_end) {
-				iWrite = 0;
 				ptInt16 = (int16_t *)DD->playbuf_buf;
 			}
 		}
 		break;
 	case Int24:     // only works for little-endian
-		ptInt8 = (int8_t *)(DD->playbuf_buf + iWrite * dev->sample_bytes * 2);
+		ptInt8 = (int8_t *)(DD->playbuf_buf + index * bytes_per_frame);
 		for (i = 0; i < nSamples; i++) {
 			samp32 = volume * creal(cSamples[i]);
-			memcpy(ptInt8, (int8_t *)&samp32 + 1, 3);
-			ptInt8 += 3;
+			memcpy(ptInt8 + ch_I * 3, (int8_t *)&samp32 + 1, 3);
 			samp32 = volume * cimag(cSamples[i]);
-			memcpy(ptInt8, (int8_t *)&samp32 + 1, 3);
-			ptInt8 += 3;
+			memcpy(ptInt8 + ch_Q * 3, (int8_t *)&samp32 + 1, 3);
+			ptInt8 += bytes_per_frame;
 			if ((unsigned char *)ptInt8 >= buffer_end) {
-				iWrite = 0;
 				ptInt8 = (int8_t *)DD->playbuf_buf;
 			}
 		}
 		break;
 	case Int32:
-		ptInt32 = (int32_t *)(DD->playbuf_buf + iWrite * dev->sample_bytes * 2);
+		ptInt32 = (int32_t *)(DD->playbuf_buf + index * bytes_per_frame);
 		for (i = 0; i < nSamples; i++) {
-			*ptInt32++ = volume * creal(cSamples[i]);
-			*ptInt32++ = volume * cimag(cSamples[i]);
+			ptInt32[ch_I] = volume * creal(cSamples[i]);
+			ptInt32[ch_Q] = volume * cimag(cSamples[i]);
+                        ptInt32 += num_channels;
 			if ((unsigned char *)ptInt32 >= buffer_end) {
-				iWrite = 0;
 				ptInt32 = (int32_t *)DD->playbuf_buf;
 			}
 		}
 		break;
 	case Float32:
-		ptFloat = (float *)(DD->playbuf_buf + iWrite * dev->sample_bytes * 2);
+		ptFloat = (float *)(DD->playbuf_buf + index * bytes_per_frame);
 		for (i = 0; i < nSamples; i++) {
-			*ptFloat++ = volume * creal(cSamples[i]) / CLIP32;
-			*ptFloat++ = volume * cimag(cSamples[i]) / CLIP32;
+			ptFloat[ch_I] = volume * creal(cSamples[i]) / CLIP32;
+			ptFloat[ch_Q] = volume * cimag(cSamples[i]) / CLIP32;
+                        ptFloat += num_channels;
 			if ((unsigned char *)ptFloat >= buffer_end) {
-				iWrite = 0;
 				ptFloat = (float *)DD->playbuf_buf;
 			}
 		}
 		break;
 	}
-	iWrite = DD->playbuf_iWrite + nSamples;
-	if (iWrite >= DD->playbuf_nFrames)
-		iWrite -= DD->playbuf_nFrames;
-	DD->playbuf_iWrite = iWrite;	// must be atomic
+	nWrite = nWrite + nSamples;
+	atomic_store(&DD->playbuf_nWrite, nWrite);
 }
 
 int quisk_read_wasapi(struct sound_dev * dev, complex double * cSamples)
 {	// Called from Quisk by the sound thread. Read samples from the sound card capture buffer.
 	// cSamples can be NULL to discard samples.
 	struct dev_data_t * DD = dev->device_data;
-	int i;
+	int i, bytes_per_frame, num_channels, ch_I, ch_Q;
 	BYTE * pData;
 	UINT32 numFramesAvailable;
 	DWORD flags;
-	float timer;
 	double samp_r, samp_i;
+	int8_t  * ptInt8;
 	int16_t * ptInt16;
 	int32_t * ptInt32;
 	float   * ptFloat32;
+	int32_t iReal, iImag;
 	int nSamples;
-	int second_try;
 	HRESULT hr;
 
 	if (DD == NULL || dev->handle == NULL)
 		return 0;
 
 	nSamples = 0;
-	second_try = 0;
+	ch_I = dev->channel_I;
+	ch_Q = dev->channel_Q;
+	bytes_per_frame = dev->sample_bytes * dev->num_channels;
+        num_channels = dev->num_channels;
 	while (1) {	// Get the available data
 		hr = IAudioCaptureClient_GetBuffer(DD->pCaptureClient, &pData, &numFramesAvailable, &flags, NULL, NULL);
 		if (hr == AUDCLNT_S_BUFFER_EMPTY) {
-			if (dev->read_frames <= 0)	// non-blocking read, we are finished
-				break;
-			if (second_try)		// sleep only once
-				break;
-			second_try = 1;
-			timer = (float)(dev->read_frames - nSamples) / dev->sample_rate;
-			if (timer > 0.004 && timer < 0.100) {
-				QuiskSleepMicrosec((int)(timer * 1E6));
-				continue;	// try again
-			}
-			break;
+                        break;          // always use non-blocking read
 		}
 		if (hr != S_OK) {	// Error
+			dev->dev_error++;
 			QuiskPrintf("%s:  Error processing buffer\n", dev->stream_description);
 			break;
 		}
@@ -379,32 +389,45 @@ int quisk_read_wasapi(struct sound_dev * dev, complex double * cSamples)
 			case Int16:
 				ptInt16 = (int16_t *)pData;
 				for (i = 0; i < numFramesAvailable; i++) {
-					samp_r = *ptInt16++;
-					samp_i = *ptInt16++;
+					samp_r = ptInt16[ch_I];
+					samp_i = ptInt16[ch_Q];
 					cSamples[nSamples++] = (samp_r + I * samp_i) * CLIP16;
+                                        ptInt16 += num_channels;
 				}
 				break;
-			case Int24:
+	                case Int24:     // only works for little-endian
+				ptInt8 = (int8_t *)pData;
+				for (i = 0; i < numFramesAvailable; i++) {
+                                        iReal = 0;
+			                memcpy((int8_t *)&iReal + 1, ptInt8 + ch_I * 3, 3);
+                                        iImag = 0;
+			                memcpy((int8_t *)&iImag + 1, ptInt8 + ch_Q * 3, 3);
+					cSamples[nSamples++] = (iReal + I * iImag);
+                                        ptInt8 += bytes_per_frame;
+				}
 				break;
 			case Int32:
 				ptInt32 = (int32_t *)pData;
 				for (i = 0; i < numFramesAvailable; i++) {
-					samp_r = *ptInt32++;
-					samp_i = *ptInt32++;
+					samp_r = ptInt32[ch_I];
+					samp_i = ptInt32[ch_Q];
 					cSamples[nSamples++] = (samp_r + I * samp_i);
+                                        ptInt32 += num_channels;
 				}
 				break;
 			case Float32:
 				ptFloat32 = (float *)pData;
 				for (i = 0; i < numFramesAvailable; i++) {
-					samp_r = *ptFloat32++;
-					samp_i = *ptFloat32++;
+					samp_r = ptFloat32[ch_I];
+					samp_i = ptFloat32[ch_Q];
 					cSamples[nSamples++] = (samp_r + I * samp_i) * CLIP32;
+                                        ptFloat32 += num_channels;
 				}
 				break;
 			}
 		}
 		if (FAILED(IAudioCaptureClient_ReleaseBuffer(DD->pCaptureClient, numFramesAvailable))) {
+			dev->dev_error++;
 			QuiskPrintf("%s:  Failure to release buffer\n", dev->stream_description);
 			break;
 		}
@@ -413,17 +436,59 @@ int quisk_read_wasapi(struct sound_dev * dev, complex double * cSamples)
 	return nSamples;
 }
 
+#if 0
+static void MeasureTimerPrecision(void)
+{
+	DWORD t1, t2;
+	int state = 1;
+
+	t1 = timeGetTime();
+	while (state) {
+		switch (state) {
+		case 1:
+			t1 = timeGetTime();
+			state = 2;
+			break;
+		case 2:
+			t2 = timeGetTime();
+			if (t1 != t2) {
+				t1 = t2;
+				state = 3;
+			}
+			break;
+		case 3:
+			t2 = timeGetTime();
+			if (t1 != t2) {
+				QuiskPrintf("MeasureTimerPrecision %d millisec\n", t2 - t1);
+				t1 = t2;
+				state = 4;
+			}
+			break;
+		case 4:
+			t2 = timeGetTime();
+			if (t1 != t2) {
+				QuiskPrintf("MeasureTimerPrecision %d millisec\n", t2 - t1);
+				t1 = t2;
+				state = 0;
+			}
+			break;
+		}
+	}
+}
+#endif
+
 void quisk_play_wasapi(struct sound_dev * dev, int nSamples, complex double * cSamples, double volume)
 {	// Called from Quisk by the sound thread. Write samples to the sound card buffer.
 	UINT32 numFramesPadding;
 	BYTE *pData;
+	int8_t * ptb;
 	int16_t * pts;
 	int32_t * ptl;
 	float * ptf;
+        int32_t samp32;
 	struct dev_data_t * DD = dev->device_data;
-	float buffer_fill;
-	int n, frames;
-	double tm;
+	double buffer_fill;
+	int n, frames, bytes_per_frame;
 
 	if (DD == NULL || dev->handle == NULL)
 		return;
@@ -431,14 +496,9 @@ void quisk_play_wasapi(struct sound_dev * dev, int nSamples, complex double * cS
 		QuiskPrintf("%s:  quisk_play_wasapi failed to get padding\n", dev->stream_description);
 		return;
 	}
-	buffer_fill = (float)(numFramesPadding + nSamples) / DD->bufferSizeFrames;
-	if (quisk_sound_state.verbose_sound > 1) {
-		tm = QuiskTimeSec();
-		if (tm - dev->TimerTime0 > 10.000) {
-			QuiskPrintf("%s:  Buffer Fill %.2f%%\n", dev->stream_description, buffer_fill * 100);
-			dev->TimerTime0 = tm;
-		}
-	}
+	buffer_fill = (double)(numFramesPadding + nSamples / 2) / DD->bufferSizeFrames;
+	dev->cr_average_fill += buffer_fill;
+	dev->cr_average_count++;
 	dev->dev_latency = numFramesPadding + nSamples;		// frames in buffer available to play
 	switch(dev->started) {
 	case 0:	 // Starting state; wait for samples to become regular
@@ -472,20 +532,6 @@ void quisk_play_wasapi(struct sound_dev * dev, int nSamples, complex double * cS
 				QuiskPrintf ("%s:  Buffer too full\n", dev->stream_description);
 			nSamples = 0;
 			dev->started = 2;
-		}
-		else if (buffer_fill > 0.7 && nSamples >= 1) {
-			nSamples--;
-#if DEBUG_IO
-			QuiskPrintf("%s:  play_alsa Remove a sample\n", dev->stream_description);
-#endif
-		}
-		else if(buffer_fill < 0.3 && nSamples >= 2) {
-			cSamples[nSamples] = cSamples[nSamples - 1];
-			cSamples[nSamples - 1] = (cSamples[nSamples - 2] + cSamples[nSamples]) / 2.0;
-			nSamples++;
-#if DEBUG_IO
-			QuiskPrintf ("%s:  play_alsa Add a sample\n", dev->stream_description);
-#endif
 		}
 		break;
 	case 2:	 // Buffer is too full; wait for it to drain
@@ -530,7 +576,16 @@ void quisk_play_wasapi(struct sound_dev * dev, int nSamples, complex double * cS
 			ptf += dev->num_channels;
 		}
 		break;
-	case Int24:
+        case Int24:     // only works for little-endian
+		ptb = (int8_t *)pData;
+	        bytes_per_frame = dev->sample_bytes * dev->num_channels;
+		for (n = 0; n < nSamples; n++) {
+			samp32 = volume * creal(cSamples[n]);
+			memcpy(ptb + dev->channel_I * 3, (int8_t *)&samp32 + 1, 3);
+			samp32 = volume * cimag(cSamples[n]);
+			memcpy(ptb + dev->channel_Q * 3, (int8_t *)&samp32 + 1, 3);
+			ptb += bytes_per_frame;
+		}
 		break;
 	}
 	IAudioRenderClient_ReleaseBuffer(DD->pRenderClient, nSamples, 0);
@@ -604,23 +659,39 @@ static void MakeWFext(int extensible, sound_format_t sound_format, WORD nChannel
 	pwfex->Format.wBitsPerSample = dev->sample_bytes * 8;
 }
 
-static int make_format(struct sound_dev * dev, WAVEFORMATEXTENSIBLE * pWaveFormat)
+static int make_format(struct sound_dev * dev, WAVEFORMATEXTENSIBLE * pWaveFormat, AUDCLNT_SHAREMODE sharemode)
 {
 	struct dev_data_t * DD = dev->device_data;
 	WAVEFORMATEX * pEx = (WAVEFORMATEX *)pWaveFormat;
+        WAVEFORMATEX * pClosestMatch;
 	WORD nChannels;
 	sound_format_t sound_format;
+        HRESULT result;
 
 	nChannels = dev->num_channels;
-	for (sound_format = 0; sound_format <= Float32; sound_format++) {
+	for (sound_format = 0; sound_format <= Int24; sound_format++) {
 		MakeWFext(1, sound_format, nChannels, dev, pWaveFormat);
-		if (IAudioClient_IsFormatSupported(DD->pAudioClient, AUDCLNT_SHAREMODE_EXCLUSIVE, pEx, NULL) == S_OK)
+		if (sharemode == AUDCLNT_SHAREMODE_EXCLUSIVE)
+		        result = IAudioClient_IsFormatSupported(DD->pAudioClient, sharemode, pEx, NULL);
+                else {
+                        pClosestMatch = NULL;
+		        result = IAudioClient_IsFormatSupported(DD->pAudioClient, sharemode, pEx, &pClosestMatch);
+                        CoTaskMemFree(pClosestMatch);
+                }
+                if (result == S_OK)
 			return 1;
 	}
 	if (dev->dev_index == t_Playback || dev->dev_index == t_MicCapture) {	// mono device is OK for radio sound or mic
-		for (sound_format = 0; sound_format <= Float32; sound_format++) {
+		for (sound_format = 0; sound_format <= Int24; sound_format++) {
 			MakeWFext(1, sound_format, 1, dev, pWaveFormat);
-			if (IAudioClient_IsFormatSupported(DD->pAudioClient, AUDCLNT_SHAREMODE_EXCLUSIVE, pEx, NULL) == S_OK) {
+		        if (sharemode == AUDCLNT_SHAREMODE_EXCLUSIVE)
+		                result = IAudioClient_IsFormatSupported(DD->pAudioClient, sharemode, pEx, NULL);
+                        else {
+                                pClosestMatch = NULL;
+		                result = IAudioClient_IsFormatSupported(DD->pAudioClient, sharemode, pEx, &pClosestMatch);
+                                CoTaskMemFree(pClosestMatch);
+                        }
+                        if (result == S_OK) {
 				dev->num_channels = 1;
 				dev->channel_I = 0;
 				dev->channel_Q = 0;
@@ -630,9 +701,16 @@ static int make_format(struct sound_dev * dev, WAVEFORMATEXTENSIBLE * pWaveForma
 	}
 	// Try to open with more channels
 	for (nChannels = dev->num_channels + 1; nChannels <= 7; nChannels++) {
-		for (sound_format = 0; sound_format <= Float32; sound_format++) {
+		for (sound_format = 0; sound_format <= Int24; sound_format++) {
 			MakeWFext(1, sound_format, nChannels, dev, pWaveFormat);
-			if (IAudioClient_IsFormatSupported(DD->pAudioClient, AUDCLNT_SHAREMODE_EXCLUSIVE, pEx, NULL) == S_OK) {
+		        if (sharemode == AUDCLNT_SHAREMODE_EXCLUSIVE)
+		                result = IAudioClient_IsFormatSupported(DD->pAudioClient, sharemode, pEx, NULL);
+                        else {
+                                pClosestMatch = NULL;
+		                result = IAudioClient_IsFormatSupported(DD->pAudioClient, sharemode, pEx, &pClosestMatch);
+                                CoTaskMemFree(pClosestMatch);
+                        }
+                        if (result == S_OK) {
 				dev->num_channels = nChannels;
 				return 1;
 			}
@@ -676,6 +754,7 @@ static void open_wasapi_capture(struct sound_dev * dev)
 	LPWSTR pwszID;
 	struct dev_data_t * DD = dev->device_data;
 	HRESULT hr;
+	DWORD err_code;
 
 	dev->dev_errmsg[0] = 0;
 	if (quisk_sound_state.verbose_sound)
@@ -685,7 +764,11 @@ static void open_wasapi_capture(struct sound_dev * dev)
 
 	pwszID = to_pwsz(dev->device_name);
 	if (pwszID == NULL) {
-		close_device(dev, "Failure to convert device name");
+		err_code = GetLastError();
+		snprintf(dev->dev_errmsg, QUISK_SC_SIZE, "Failure 0x%lX to convert device name: %.80s", err_code, dev->device_name);
+		if (quisk_sound_state.verbose_sound)
+			QuiskPrintf("%s\n", dev->dev_errmsg);
+		close_device(dev, NULL);
 		return;
 	}
 	if (FAILED(IMMDeviceEnumerator_GetDevice(pEnumerator, pwszID, &DD->pDevice))) {
@@ -704,9 +787,19 @@ static void open_wasapi_capture(struct sound_dev * dev)
 				(int)def_period / REFTIMES_PER_MICROSEC, (int)min_period / REFTIMES_PER_MICROSEC);
 	}
 
-	if (make_format(dev, &wave_format) == 0) {
-		close_device(dev, "Device can not support the sample rate or number of channels.");
-		return;
+	if (make_format(dev, &wave_format, AUDCLNT_SHAREMODE_EXCLUSIVE) == 0) {		// failure
+		if (make_format(dev, &wave_format, AUDCLNT_SHAREMODE_SHARED) == 0) {	// failure
+			close_device(dev, "Device can not support the sample rate or number of channels.");
+			return;
+		}
+		DD->sharemode = AUDCLNT_SHAREMODE_SHARED;
+		if (quisk_sound_state.verbose_sound)
+			QuiskPrintf("  Exclusive mode refused. Open device in Shared mode\n");
+	}
+	else {
+		DD->sharemode = AUDCLNT_SHAREMODE_EXCLUSIVE;
+		if (quisk_sound_state.verbose_sound)
+			QuiskPrintf("  Open device in Exclusive mode\n");
 	}
 
 	if (quisk_sound_state.verbose_sound) {
@@ -716,10 +809,10 @@ static void open_wasapi_capture(struct sound_dev * dev)
 		QuiskPrintf("  Number of channels %d, bytes per sample %d\n", dev->num_channels, dev->sample_bytes);
 	}
 	hnsRequestedDuration = REFTIMES_PER_MILLISEC * quisk_sound_state.latency_millisecs;
-	hr = IAudioClient_Initialize(DD->pAudioClient, AUDCLNT_SHAREMODE_EXCLUSIVE, 0, hnsRequestedDuration, 0, (WAVEFORMATEX *)&wave_format, NULL);
+	hr = IAudioClient_Initialize(DD->pAudioClient, DD->sharemode, 0, hnsRequestedDuration, 0, (WAVEFORMATEX *)&wave_format, NULL);
 	if (FAILED(hr)) {
 		for ( ;hnsRequestedDuration > REFTIMES_PER_MILLISEC * 20; hnsRequestedDuration -= (REFTIMES_PER_MILLISEC * 20)) {
-			hr = IAudioClient_Initialize(DD->pAudioClient, AUDCLNT_SHAREMODE_EXCLUSIVE, 0, hnsRequestedDuration, 0, (WAVEFORMATEX *)&wave_format, NULL);
+			hr = IAudioClient_Initialize(DD->pAudioClient, DD->sharemode, 0, hnsRequestedDuration, 0, (WAVEFORMATEX *)&wave_format, NULL);
 			if (hr == S_OK)
 				break;
 		}
@@ -748,21 +841,23 @@ static void open_wasapi_capture(struct sound_dev * dev)
 		return;
 	}
 	if (quisk_sound_state.verbose_sound) {
-		QuiskPrintf("  Capture buffer size %d frames\n  Started.\n", DD->bufferSizeFrames);
+		QuiskPrintf("  Capture Wasapi buffer size %d frames\n  Started.\n", DD->bufferSizeFrames);
 	}
 }
 
 static void open_wasapi_playback(struct sound_dev * dev, int use_callback)
 {
-	REFERENCE_TIME hnsRequestedDuration = 0;
+	REFERENCE_TIME hnsRequestedDuration;
 	REFERENCE_TIME def_period, min_period;
 	WAVEFORMATEXTENSIBLE wave_format;
+        int i;
 	BYTE *pData;
 	LPWSTR pwszID;
 	struct dev_data_t * DD = dev->device_data;
 	HRESULT hr = S_OK;
 	HANDLE hThread = NULL;
 	DWORD ThreadID;
+	DWORD err_code;
 
 	dev->dev_errmsg[0] = 0;
 	if (quisk_sound_state.verbose_sound) {
@@ -773,7 +868,11 @@ static void open_wasapi_playback(struct sound_dev * dev, int use_callback)
 
 	pwszID = to_pwsz(dev->device_name);
 	if (pwszID == NULL) {
-		close_device(dev, "Failure to convert device name");
+		err_code = GetLastError();
+		snprintf(dev->dev_errmsg, QUISK_SC_SIZE, "Failure 0x%lX to convert device name: %.80s", err_code, dev->device_name);
+		if (quisk_sound_state.verbose_sound)
+			QuiskPrintf("%s\n", dev->dev_errmsg);
+		close_device(dev, NULL);
 		return;
 	}
 	if (FAILED(IMMDeviceEnumerator_GetDevice(pEnumerator, pwszID, &DD->pDevice))) {
@@ -792,21 +891,37 @@ static void open_wasapi_playback(struct sound_dev * dev, int use_callback)
 				(int)def_period / REFTIMES_PER_MICROSEC, (int)min_period / REFTIMES_PER_MICROSEC);
 	}
 
-	if (make_format(dev, &wave_format) == 0) {
-		close_device(dev, "Device can not support the sample rate or number of channels.");
-		return;
+	if (make_format(dev, &wave_format, AUDCLNT_SHAREMODE_EXCLUSIVE) == 0) {		// failure
+		if (make_format(dev, &wave_format, AUDCLNT_SHAREMODE_SHARED) == 0) {	// failure
+			close_device(dev, "Device can not support the sample rate or number of channels.");
+			return;
+		}
+		DD->sharemode = AUDCLNT_SHAREMODE_SHARED;
+		if (quisk_sound_state.verbose_sound)
+			QuiskPrintf("  Exclusive mode refused. Open device in Shared mode\n");
+	}
+	else {
+		DD->sharemode = AUDCLNT_SHAREMODE_EXCLUSIVE;
+		if (quisk_sound_state.verbose_sound)
+			QuiskPrintf("  Open device in Exclusive mode\n");
 	}
 	if (quisk_sound_state.verbose_sound) {
 		QuiskPrintf("  Sample rate %d\n  Channel_I %d\n  Channel_Q %d\n",
 			dev->sample_rate, dev->channel_I, dev->channel_Q);
 		QuiskPrintf("  Sound device format %s\n", sound_format_names[dev->sound_format]);
 		QuiskPrintf("  Number of channels %d, bytes per sample %d\n", dev->num_channels, dev->sample_bytes);
+		//MeasureTimerPrecision();
 	}
 	if (use_callback) {
-		hnsRequestedDuration = REFTIMES_PER_MICROSEC * quisk_sound_state.data_poll_usec;
-		if (hnsRequestedDuration < min_period)
-			hnsRequestedDuration = min_period;
-		hr = IAudioClient_Initialize(DD->pAudioClient, AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+		if (DD->sharemode == AUDCLNT_SHAREMODE_EXCLUSIVE) {
+			hnsRequestedDuration = REFTIMES_PER_MICROSEC * quisk_sound_state.data_poll_usec;
+			if (hnsRequestedDuration < min_period)
+				hnsRequestedDuration = min_period;
+		}
+		else {
+			hnsRequestedDuration = 0;
+		}
+		hr = IAudioClient_Initialize(DD->pAudioClient, DD->sharemode, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
 			hnsRequestedDuration, hnsRequestedDuration, (WAVEFORMATEX *)&wave_format, NULL);
 		if (hr == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED) {
 			if (quisk_sound_state.verbose_sound)
@@ -822,11 +937,16 @@ static void open_wasapi_playback(struct sound_dev * dev, int use_callback)
 				close_device(dev, "No audio client");
 				return;
 			}
-			hr = IAudioClient_Initialize(DD->pAudioClient, AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+			hr = IAudioClient_Initialize(DD->pAudioClient, DD->sharemode, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
 				hnsRequestedDuration, hnsRequestedDuration, (WAVEFORMATEX *)&wave_format, NULL);
 		}
 		if (hr != S_OK) {
 			close_device(dev, "Could not initialize");
+			return;
+		}
+		// Get the size of the allocated buffer.
+		if (FAILED(IAudioClient_GetBufferSize(DD->pAudioClient, &DD->bufferSizeFrames))) {
+			close_device(dev, "Could not get buffer size");
 			return;
 		}
 		// Create an event handle and register it for buffer-event notifications.
@@ -839,29 +959,34 @@ static void open_wasapi_playback(struct sound_dev * dev, int use_callback)
 			close_device(dev, "SetEventHandle failed");
 			return;
 		}
-		DD->playbuf_nFrames = dev->latency_frames * 2;
-		DD->playbuf_buf = calloc(DD->playbuf_nFrames * dev->sample_bytes * 2, 1);
-		DD->playbuf_iWrite = DD->playbuf_nFrames / 2;   // buffer starts half full
-		DD->playbuf_iRead = 0;
-		DD->playbuf_read_reset = 0;
-		DD->playbuf_write_reset = 0;
+                i = dev->latency_frames * 2 / DD->bufferSizeFrames;     // playbuf_nFrames is a multiple of bufferSizeFrames
+		i = ((i + 1) / 2) * 2;		// multiple is an even number
+                if ( i < 4)
+                        i = 4;
+		DD->playbuf_nFrames = i * DD->bufferSizeFrames;
+		DD->playbuf_buf = calloc(DD->playbuf_nFrames * dev->sample_bytes * dev->num_channels, 1);
+		atomic_store(&DD->playbuf_nWrite, i / 2 * DD->bufferSizeFrames);   // buffer starts half full
+		atomic_store(&DD->playbuf_nRead, 0);
+		DD->playbuf_underrun_reset = 0;
+		DD->playbuf_underrun_msg = 0;
+		DD->playbuf_overflow_reset = 0;
 		hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) playdevice_threadproc, dev, CREATE_SUSPENDED, &ThreadID);
 		if (hThread == NULL ) {
 			close_device(dev, "Create thread failed");
 			return;
 		}
-		// Get the size of the allocated buffer.
-		if (FAILED(IAudioClient_GetBufferSize(DD->pAudioClient, &DD->bufferSizeFrames))) {
-			close_device(dev, "Could not get buffer size");
-			return;
+		dev->play_buf_size = DD->playbuf_nFrames;
+		if (quisk_sound_state.verbose_sound) {
+			QuiskPrintf("  Wasapi buffer size %d frames\n", DD->bufferSizeFrames);
+			QuiskPrintf("  Callback ring buffer size %d frames\n", DD->playbuf_nFrames);
+			QuiskPrintf("  Starting the callback thread for %s\n", dev->stream_description);
 		}
-		dev->play_buf_size = DD->bufferSizeFrames * dev->sample_bytes * dev->num_channels;
 		ResumeThread(hThread);
 	}
 	else {
 		hnsRequestedDuration = quisk_sound_state.latency_millisecs * REFTIMES_PER_MILLISEC * 2;		// reduce this if too large
 		for ( ;hnsRequestedDuration > REFTIMES_PER_MILLISEC * 20; hnsRequestedDuration -= (REFTIMES_PER_MILLISEC * 20)) {
-			hr = IAudioClient_Initialize(DD->pAudioClient, AUDCLNT_SHAREMODE_EXCLUSIVE, 0,
+			hr = IAudioClient_Initialize(DD->pAudioClient, DD->sharemode, 0,
 				hnsRequestedDuration, 0, (WAVEFORMATEX *)&wave_format, NULL);
 			if (hr == S_OK)
 				break;
@@ -876,7 +1001,7 @@ static void open_wasapi_playback(struct sound_dev * dev, int use_callback)
 			close_device(dev, "Could not get buffer size");
 			return;
 		}
-		dev->play_buf_size = DD->bufferSizeFrames * dev->sample_bytes * dev->num_channels;
+		dev->play_buf_size = DD->bufferSizeFrames;
 
 		if (FAILED(IAudioClient_GetService(DD->pAudioClient, IID_IAUDIORENDERCLIENT, (void**)&DD->pRenderClient))) {
 			close_device(dev, "Could not create playback client");
@@ -891,10 +1016,8 @@ static void open_wasapi_playback(struct sound_dev * dev, int use_callback)
 			return;
 		}
 		if (quisk_sound_state.verbose_sound) {
-			QuiskPrintf("  Playback buffer size %d frames\n", DD->bufferSizeFrames);
-			if (use_callback)
-				QuiskPrintf("  Callback ring buffer size %d frames\n", DD->playbuf_nFrames);
-			QuiskPrintf("  Started.\n");
+			QuiskPrintf("  Playback Wasapi buffer size %d frames\n", DD->bufferSizeFrames);
+			QuiskPrintf("  Starting playback for %s\n", dev->stream_description);
 		}
 	}
 }
@@ -1077,37 +1200,51 @@ static void midi_in_devices(PyObject * pylist)
 	}
 }
 
-void CALLBACK MidiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD dwInstance, DWORD dwParam1, DWORD dwParam2)
+#define MIDI_MAX	6000
+
+static char midi_chars[MIDI_MAX];
+static int midi_length;
+static HANDLE MIDI_mutex;
+
+static void CALLBACK MidiInProc(HMIDIIN hMidiIn, UINT wMsg, DWORD dwInstance, DWORD dwParam1, DWORD dwParam2)
 {
-	int msg, note, velocity;
+	int status, note, velocity;
 
 	if (wMsg == MIM_DATA) {
-		msg = (dwParam1 >> 4) & 0xF;
+		status = dwParam1 & 0xFF;
 		note = (dwParam1 >> 8) & 0x7F;
 		velocity = (dwParam1 >> 16) & 0x7F;
-		//QuiskPrintf ("instance %ld msg %d note %d veloc %d\n", dwInstance, msg, note, velocity);
+		while (WaitForSingleObject(MIDI_mutex, 0) == WAIT_TIMEOUT) ;
+		if (midi_length <= MIDI_MAX - 3) {
+			midi_chars[midi_length++] = status;
+			midi_chars[midi_length++] = note;
+			midi_chars[midi_length++] = velocity;
+		}
+		ReleaseMutex(MIDI_mutex);
 		if (note == dwInstance) {       // dwInstance is the CW note
-			if (msg == 9) {		// Note ON
+			// ignore channel number
+			if ((status & 0xF0) == 0x90) {		// Note ON
 				if (velocity)
 					quisk_midi_cwkey = 1;
 				else
 					quisk_midi_cwkey = 0;
 			}
-			else if (msg == 8) {     // Note OFF
+			else if ((status & 0xF0) == 0x80) {     // Note OFF
 				quisk_midi_cwkey = 0;
 			}
 		}
 	}
 }
 
-PyObject * quisk_control_midi(PyObject * self, PyObject * args, PyObject * keywds)
+PyObject * quisk_wasapi_control_midi(PyObject * self, PyObject * args, PyObject * keywds)
 {  /* Call with keyword arguments ONLY */
+// midiOutShortMsg
 	static char * kwlist[] = {"client", "device", "close_port", "get_event", "midi_cwkey_note",
 					"get_in_names", "get_in_devices", NULL} ;
 	int client, close_port, get_event, get_in_names, get_in_devices;
 	static int midi_cwkey_note = -1;
 	char * device;
-	PyObject * pylist;
+	PyObject * pylist, * pybytes;
 	static HMIDIIN hMidiDevice = NULL;;
 
 	client = close_port = get_event = get_in_names = get_in_devices = -1;
@@ -1134,6 +1271,8 @@ PyObject * quisk_control_midi(PyObject * self, PyObject * args, PyObject * keywd
 		return pylist;
 	}
 	if (client >= 0) {		// open client port
+		if ( ! MIDI_mutex)
+			MIDI_mutex = CreateMutex(NULL, FALSE, NULL);
 		quisk_midi_cwkey = 0;
 		if (hMidiDevice == NULL) {
 			if (midiInOpen(&hMidiDevice, client, (DWORD_PTR)(void*)MidiInProc, midi_cwkey_note, CALLBACK_FUNCTION) != MMSYSERR_NOERROR) {
@@ -1147,8 +1286,94 @@ PyObject * quisk_control_midi(PyObject * self, PyObject * args, PyObject * keywd
 			}
 		}
 	}
-	if (get_event == 1)		// poll to get event
-		;
+	if (get_event == 1) {		// poll to get event
+		if (midi_length != 0) {
+			while (WaitForSingleObject(MIDI_mutex, 0) == WAIT_TIMEOUT) ;
+			pybytes = PyByteArray_FromStringAndSize(midi_chars, midi_length);
+			midi_length = 0;
+			ReleaseMutex(MIDI_mutex);
+			return pybytes;
+		}
+	}
 	Py_INCREF (Py_None);
 	return Py_None;
 }
+#else		// No Wasapi available
+#include <Python.h>
+#include <complex.h>
+#include "quisk.h"
+
+PyObject * quisk_wasapi_sound_devices(PyObject * self, PyObject * args)		// Called from the GUI thread
+{	// Return a list of sound device data [pycapt, pyplay]
+	return quisk_dummy_sound_devices(self, args);
+}
+
+void quisk_start_sound_wasapi (struct sound_dev ** pCapture, struct sound_dev ** pPlayback)
+{
+	struct sound_dev * pDev;
+	const char * msg = "No driver support for this device";
+
+	while (*pCapture) {
+		pDev = *pCapture++;
+		if (pDev->driver == DEV_DRIVER_WASAPI) {
+			strMcpy(pDev->dev_errmsg, msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				QuiskPrintf("%s\n", msg);
+		}
+	}
+	while (*pPlayback) {
+		pDev = *pPlayback++;
+		if (pDev->driver == DEV_DRIVER_WASAPI) {
+			strMcpy(pDev->dev_errmsg, msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				QuiskPrintf("%s\n", msg);
+		}
+		else if (pDev->driver == DEV_DRIVER_WASAPI2) {
+			strMcpy(pDev->dev_errmsg, msg, QUISK_SC_SIZE);
+			if (quisk_sound_state.verbose_sound)
+				QuiskPrintf("%s\n", msg);
+		}
+	}
+}
+
+void quisk_write_wasapi(struct sound_dev * dev, int nSamples, complex double * cSamples, double volume)
+{}
+
+int quisk_read_wasapi(struct sound_dev * dev, complex double * cSamples)
+{
+	return 0;
+}
+
+void quisk_play_wasapi(struct sound_dev * dev, int nSamples, complex double * cSamples, double volume)
+{}
+
+void quisk_close_sound_wasapi(struct sound_dev ** pCapture, struct sound_dev ** pPlayback)
+{}
+
+// Note: Return values must be kept up to date!
+PyObject * quisk_wasapi_control_midi(PyObject * self, PyObject * args, PyObject * keywds)
+{
+	static char * kwlist[] = {"client", "device", "close_port", "get_event", "midi_cwkey_note",
+					"get_in_names", "get_in_devices", NULL} ;
+	int client, close_port, get_event, get_in_names, get_in_devices;
+	static int midi_cwkey_note = -1;
+	char * device;
+	PyObject * pylist;
+
+	client = close_port = get_event = get_in_names = get_in_devices = -1;
+	device = NULL;
+	if (!PyArg_ParseTupleAndKeywords (args, keywds, "|isiiiii", kwlist,
+			&client, &device, &close_port, &get_event, &midi_cwkey_note, &get_in_names, &get_in_devices))
+		return NULL;
+	if (get_in_devices == 1) {	// return a list of MIDI devices; just a list of names
+		pylist = PyList_New(0);
+		return pylist;
+	}
+	if (get_in_names == 1) {	// return a list of MIDI devices; just a list of names
+		pylist = PyList_New(0);
+		return pylist;
+	}
+	Py_INCREF (Py_None);
+	return Py_None;
+}
+#endif
